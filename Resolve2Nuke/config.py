@@ -1,0 +1,80 @@
+"""
+Resolve2Nuke.config
+===================
+
+Constants for pulling shots from DaVinci Resolve into Nuke.
+
+The colour settings below were verified by pixel test on 2026-11-12 (Resolve
+21.1, Nuke 17.1v1): an EXR written with these settings sits on the Resolve
+timeline over its BRAW with a median difference of 0.0006 in DaVinci
+Intermediate, with no colour space transforms or bypass in Resolve.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import platform
+
+# #----------------------------------------------------------------------------
+# # Logging
+
+# LOG_LEVEL = logging.DEBUG
+LOG_LEVEL = logging.INFO
+
+# # "full"  - [r2n.module.Class.function] LEVEL: message (development)
+# # "short" - [r2n] LEVEL: message
+LOG_PREFIX_STYLE = "full"
+
+# #----------------------------------------------------------------------------
+# # Resources
+
+PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+ICON_PATH = os.path.join(PACKAGE_DIR, "resources", "DaVinci_Resolve_Studio_icon.png")
+MENU_NAME = "Resolve2Nuke"
+
+# #----------------------------------------------------------------------------
+# # Resolve scripting API locations, per platform (Resolve's documented defaults)
+
+_SYSTEM = platform.system()
+if _SYSTEM == "Windows":
+    RESOLVE_SCRIPT_API = os.path.expandvars(r"%PROGRAMDATA%\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting")
+    RESOLVE_SCRIPT_LIB = r"C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll"
+elif _SYSTEM == "Darwin":
+    RESOLVE_SCRIPT_API = "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting"
+    RESOLVE_SCRIPT_LIB = "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so"
+else:
+    RESOLVE_SCRIPT_API = "/opt/resolve/Developer/Scripting"
+    RESOLVE_SCRIPT_LIB = "/opt/resolve/libs/Fusion/fusionscript.so"
+
+# #----------------------------------------------------------------------------
+# # Colour
+
+# # Set on the root by name only. Its values() entries are "name\tACES/name",
+# # and passing that whole string silently keeps the old config.
+OCIO_CONFIG = "fn-nuke_studio-config-v2.2.0_aces-v1.3_ocio-v2.4"
+
+# # Resolve input colour space (clip property, or the project's default when
+# # the clip says "Project") -> OCIO colourspace for the Read.
+# # Only add entries that have been pixel tested.
+RESOLVE_TO_OCIO = {
+    "Blackmagic Design Film Gen 5": "BMDFilm WideGamut Gen5",
+}
+
+# # BRAW decode. Camera Metadata matches Resolve's decode when the clip's
+# # Camera Raw panel is on Camera Metadata (or Project, with the project on it).
+BRAW_DECODE_USING = "Camera Metadata"
+
+# #----------------------------------------------------------------------------
+# # Write
+
+WRITE_FILE = "[getenv SHOT_ROOT]/renders/comp/c_[getenv SHOT_NAME]_comp_v01.%04d.exr"
+WRITE_COLORSPACE = "BMDFilm WideGamut Gen5"
+WRITE_DATATYPE = "16 bit half"
+
+# #----------------------------------------------------------------------------
+# # Knobs added to the Read to remember where it came from in Resolve.
+# # These names are a public API: the send-back step reads them from saved scripts.
+
+KNOB_TAB = "r2n_tab"
+KNOB_PREFIX = "r2n_"
