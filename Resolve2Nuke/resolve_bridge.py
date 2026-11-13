@@ -148,18 +148,27 @@ def _nuke_path(file_path: str) -> tuple[str, bool]:
     return file_path[:match.start()] + f"%0{padding}d" + file_path[match.end():], True
 
 
+def item_source_first(item) -> int:
+    """The Nuke frame number of the item's first frame in the timeline.
+
+    Nuke numbers movie files (BRAW, mov) from 1, and sequences by their file
+    numbers. Resolve's "Start" is 0 for movies and the first file number for
+    sequences. GetSourceStartFrame() is off by one for BRAW, so use the left
+    offset (verified against the viewer's source timecode).
+    """
+    props = item.GetMediaPoolItem().GetClipProperty()
+    clip_start = int(props.get("Start") or 0)
+    is_sequence = bool(_SEQUENCE_RE.search(props.get("File Path") or ""))
+    nuke_first_of_clip = clip_start if is_sequence else clip_start + 1
+    return nuke_first_of_clip + item.GetLeftOffset()
+
+
 def _shot_from_item(project, timeline, item) -> ShotInfo:
     mpi = item.GetMediaPoolItem()
     props = mpi.GetClipProperty()
     file_path, is_sequence = _nuke_path(props["File Path"])
 
-    # # Nuke numbers movie files (BRAW, mov) from 1, and sequences by their
-    # # file numbers. Resolve's "Start" is 0 for movies and the first file
-    # # number for sequences. GetSourceStartFrame() is off by one for BRAW, so
-    # # use the left offset (verified against the viewer's source timecode).
-    clip_start = int(props.get("Start") or 0)
-    nuke_first_of_clip = clip_start if is_sequence else clip_start + 1
-    source_first = nuke_first_of_clip + item.GetLeftOffset()
+    source_first = item_source_first(item)
     source_last = source_first + item.GetDuration() - 1
 
     colorspace = props.get("Input Color Space") or "Project"
@@ -221,3 +230,168 @@ def get_shot(resolve=None) -> ShotInfo:
     logger.info(f"Pulled from {source}: {shot.clip_name} V{shot.track_index}, "
                 f"source {shot.source_first}-{shot.source_last} ({shot.duration} frames)")
     return shot
+
+
+# #----------------------------------------------------------------------------
+# # Sending a comp back
+
+PLACEMENTS = ("follow_clip", "stored", "playhead")
+
+
+@dataclass
+class CompPlacement:
+    """What to place, and where it came from (the stamp, as plain values)."""
+    sequence_path: str       # Nuke-style, e.g. /x/c_shot_comp_v01.%04d.exr
+    first: int               # first rendered frame (= source frame number)
+    last: int
+    project: str
+    timeline: str
+    item_id: str
+    track: int
+    record_in: int
+    source_first: int
+
+
+@dataclass
+class PlaceResult:
+    placement: str           # the mode actually used
+    track: int
+    record_in: int
+    record_out: int
+    record_in_tc: str
+    clip_name: str
+    reused_media: bool
+    warnings: list
+
+
+def find_item_by_id(timeline, item_id: str):
+    """The video item with this unique ID, wherever it is now, or None."""
+    for track in range(1, timeline.GetTrackCount("video") + 1):
+        for item in timeline.GetItemListInTrack("video", track) or []:
+            if item.GetUniqueId() == item_id:
+                return item
+    return None
+
+
+def _anchor(timeline, comp: CompPlacement, placement: str, warnings: list) -> tuple[str, int, int]:
+    """(mode used, record frame of comp.first, track the comp goes above)."""
+    if placement == "follow_clip":
+        item = find_item_by_id(timeline, comp.item_id)
+        if item is not None:
+            # # Align by source frame, so a moved or trimmed clip still lines up.
+            record = item.GetStart() + (comp.first - item_source_first(item))
+            return "follow_clip", record, item.GetTrackTypeAndIndex()[1]
+        warnings.append("The original clip isn't in the timeline any more (deleted or replaced), "
+                        "so the comp was placed at the position stored when the shot was pulled.")
+        placement = "stored"
+
+    if placement == "stored":
+        return "stored", comp.record_in + (comp.first - comp.source_first), comp.track
+
+    if placement == "playhead":
+        tc = timeline.GetCurrentTimecode()
+        if ";" in tc or timeline.GetSetting("timelineDropFrameTimecode") == "1":
+            raise ResolveError("Placing at the playhead isn't supported on drop-frame timelines yet.")
+        record = _timecode_to_frame(tc, float(timeline.GetSetting("timelineFrameRate")))
+        under = _playhead_video_item(timeline)
+        return "playhead", record, under.GetTrackTypeAndIndex()[1] if under else 0
+
+    raise ValueError(f"Unknown placement '{placement}', expected one of {PLACEMENTS}")
+
+
+def _track_is_free(timeline, track: int, record_in: int, record_out: int) -> bool:
+    for item in timeline.GetItemListInTrack("video", track) or []:
+        if item.GetStart() <= record_out and item.GetEnd() - 1 >= record_in:
+            return False
+    return True
+
+
+def _free_track_above(timeline, base_track: int, record_in: int, record_out: int) -> int:
+    """The first track above base_track that's empty for the range, adding tracks as needed."""
+    track = base_track + 1
+    while track <= timeline.GetTrackCount("video") and not _track_is_free(timeline, track, record_in, record_out):
+        track += 1
+    while timeline.GetTrackCount("video") < track:
+        if not timeline.AddTrack("video"):
+            raise ResolveError("Couldn't add a video track to the timeline.")
+    return track
+
+
+def _vfx_bin(media_pool):
+    root = media_pool.GetRootFolder()
+    for folder in root.GetSubFolderList() or []:
+        if folder.GetName() == config.RESOLVE_BIN:
+            return folder
+    folder = media_pool.AddSubFolder(root, config.RESOLVE_BIN)
+    if not folder:
+        raise ResolveError(f"Couldn't create the '{config.RESOLVE_BIN}' bin in the media pool.")
+    return folder
+
+
+def _resolve_sequence_name(sequence_path: str, first: int, last: int) -> str:
+    """/x/name.%04d.exr -> /x/name.[0107-0145].exr, the way Resolve shows a sequence's File Path."""
+    match = re.search(r"%0(\d+)d", sequence_path)
+    pad = int(match.group(1)) if match else 0
+    return sequence_path[:match.start()] + f"[{first:0{pad}d}-{last:0{pad}d}]" + sequence_path[match.end():]
+
+
+def _import_sequence(media_pool, comp: CompPlacement) -> tuple[object, bool]:
+    """(media pool item, whether an existing one was reused)."""
+    folder = _vfx_bin(media_pool)
+    resolve_path = _resolve_sequence_name(comp.sequence_path, comp.first, comp.last)
+    for clip in folder.GetClipList() or []:
+        if clip.GetClipProperty("File Path") == resolve_path:
+            return clip, True
+
+    previous = media_pool.GetCurrentFolder()
+    media_pool.SetCurrentFolder(folder)
+    try:
+        items = media_pool.ImportMedia([{"FilePath": comp.sequence_path, "StartIndex": comp.first, "EndIndex": comp.last}])
+    finally:
+        if previous:
+            media_pool.SetCurrentFolder(previous)
+    if not items:
+        raise ResolveError(f"Resolve couldn't import {comp.sequence_path} ({comp.first}-{comp.last}).")
+    return items[0], False
+
+
+def place_comp(comp: CompPlacement, placement: str = "follow_clip", resolve=None) -> PlaceResult:
+    """Import a rendered comp and put it on the timeline above its plate."""
+    resolve = resolve or connect()
+    project = resolve.GetProjectManager().GetCurrentProject()
+    if not project:
+        raise ResolveError("Resolve has no project open.")
+    timeline = project.GetCurrentTimeline()
+    if not timeline:
+        raise ResolveError(f"Project '{project.GetName()}' has no timeline open.")
+
+    warnings = []
+    if project.GetName() != comp.project:
+        warnings.append(f"Resolve's project is '{project.GetName()}', but the shot came from '{comp.project}'.")
+    if timeline.GetName() != comp.timeline:
+        warnings.append(f"Resolve's timeline is '{timeline.GetName()}', but the shot came from '{comp.timeline}'.")
+
+    used, record_in, base_track = _anchor(timeline, comp, placement, warnings)
+    duration = comp.last - comp.first + 1
+    record_out = record_in + duration - 1
+    track = _free_track_above(timeline, base_track, record_in, record_out)
+
+    media_pool = project.GetMediaPool()
+    clip, reused = _import_sequence(media_pool, comp)
+
+    # # For sequences, start/endFrame are file frame numbers and endFrame is exclusive.
+    placed = media_pool.AppendToTimeline([{"mediaPoolItem": clip, "startFrame": comp.first, "endFrame": comp.last + 1,
+                                           "trackIndex": track, "recordFrame": record_in}])
+    if not placed:
+        raise ResolveError(f"Resolve couldn't place the comp on V{track} at frame {record_in}.")
+    item = placed[0]
+    if (item.GetStart(), item.GetDuration()) != (record_in, duration):
+        warnings.append(f"Resolve placed the comp at {item.GetStart()} for {item.GetDuration()} frames, "
+                        f"expected {record_in} for {duration}.")
+
+    fps = float(timeline.GetSetting("timelineFrameRate"))
+    result = PlaceResult(placement=used, track=track, record_in=item.GetStart(), record_out=item.GetEnd() - 1,
+                         record_in_tc=_frame_to_timecode(item.GetStart(), fps), clip_name=clip.GetName(),
+                         reused_media=reused, warnings=warnings)
+    logger.info(f"Placed {result.clip_name} on V{track} at {result.record_in_tc} ({used})")
+    return result

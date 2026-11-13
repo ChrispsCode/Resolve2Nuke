@@ -11,7 +11,7 @@ Script Editor:
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def pull_shot(options=None):
@@ -38,6 +38,31 @@ def pull_shot(options=None):
         nuke.message(f"Resolve2Nuke:\n\n{msg}")
 
     logger.info(f"Created {result.read.name()}" + (f" and {result.write.name()}" if result.write else ""))
+    return result
+
+
+def send_comp(options=None):
+    """Menu entry point: send the selected (or only) Write's render to Resolve."""
+    import nuke
+
+    from Resolve2Nuke import logger, resolve_bridge, send_back as send_mod
+
+    try:
+        result = send_mod.send(options=options)
+    except (send_mod.SendError, resolve_bridge.ResolveError) as e:
+        logger.error(str(e))
+        nuke.message(f"Resolve2Nuke:\n\n{e}")
+        return None
+
+    summary = (f"Placed {result.clip_name}\non V{result.track} at {result.record_in_tc} "
+               f"({result.record_out - result.record_in + 1} frames, {result.placement.replace('_', ' ')}).")
+    if result.reused_media:
+        summary += "\n\nReused the clip already in the media pool."
+    if result.warnings:
+        for w in result.warnings:
+            logger.warning(w)
+        summary += "\n\nWarnings:\n- " + "\n- ".join(result.warnings)
+    nuke.message(f"Resolve2Nuke:\n\n{summary}")
     return result
 
 

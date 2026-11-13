@@ -73,6 +73,16 @@ WRITE_COLORSPACE = "BMDFilm WideGamut Gen5"
 WRITE_DATATYPE = "16 bit half"
 
 # #----------------------------------------------------------------------------
+# # Send back
+
+# # Media pool bin (top level) that rendered comps are imported into
+RESOLVE_BIN = "VFX"
+
+# # Default placement: "follow_clip" (find the original clip wherever it is now,
+# # align by source frame), "stored" (where it was at pull time) or "playhead"
+DEFAULT_PLACEMENT = "follow_clip"
+
+# #----------------------------------------------------------------------------
 # # Knobs added to the Read to remember where it came from in Resolve.
 # # These names are a public API: the send-back step reads them from saved scripts.
 

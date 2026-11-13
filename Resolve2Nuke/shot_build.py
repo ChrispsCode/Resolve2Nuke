@@ -17,6 +17,7 @@ import nuke
 
 from Resolve2Nuke import config
 from Resolve2Nuke import logger
+from Resolve2Nuke import stamp
 from Resolve2Nuke.resolve_bridge import ShotInfo
 
 
@@ -80,38 +81,6 @@ def _set_root(shot: ShotInfo, options: ShotOptions) -> None:
 # #----------------------------------------------------------------------------
 # # Nodes
 
-def _add_resolve_knobs(node: nuke.Node, shot: ShotInfo) -> None:
-    """Remember where the plate came from, for the send-back step."""
-    p = config.KNOB_PREFIX
-    node.addKnob(nuke.Tab_Knob(config.KNOB_TAB, "Resolve2Nuke"))
-    for name, label, value in [
-        ("project", "project", shot.project_name),
-        ("timeline", "timeline", shot.timeline_name),
-        ("item_id", "item id", shot.item_id),
-        ("record_in_tc", "record in TC", shot.record_in_tc),
-        ("resolve_colorspace", "Resolve colour space", shot.resolve_colorspace),
-    ]:
-        knob = nuke.String_Knob(p + name, label)
-        knob.setValue(value)
-        knob.setEnabled(False)
-        node.addKnob(knob)
-    for name, label, value in [
-        ("track", "video track", shot.track_index),
-        ("record_in", "record in", shot.record_in),
-        ("record_out", "record out", shot.record_out),
-        ("source_first", "source first", shot.source_first),
-        ("source_last", "source last", shot.source_last),
-    ]:
-        knob = nuke.Int_Knob(p + name, label)
-        knob.setValue(value)
-        knob.setEnabled(False)
-        node.addKnob(knob)
-    knob = nuke.Double_Knob(p + "timeline_fps", "timeline fps")
-    knob.setValue(shot.timeline_fps)
-    knob.setEnabled(False)
-    node.addKnob(knob)
-
-
 def _create_read(shot: ShotInfo) -> tuple[nuke.Node, bool]:
     """Returns the Read, and whether its colour space was unknown."""
     for n in nuke.selectedNodes():
@@ -133,11 +102,11 @@ def _create_read(shot: ShotInfo) -> tuple[nuke.Node, bool]:
         read["colorspace"].setValue(ocio_space)
 
     read["label"].setValue(f"{shot.timeline_name} V{shot.track_index}\n{shot.source_first}-{shot.source_last}")
-    _add_resolve_knobs(read, shot)
+    stamp.write_stamp(read, stamp.Stamp.from_shot(shot))
     return read, unknown
 
 
-def _create_write(read: nuke.Node) -> nuke.Node:
+def _create_write(read: nuke.Node, shot: ShotInfo) -> nuke.Node:
     for n in nuke.selectedNodes():
         n.setSelected(False)
     read.setSelected(True)
@@ -147,6 +116,8 @@ def _create_write(read: nuke.Node) -> nuke.Node:
     write["colorspace"].setValue(config.WRITE_COLORSPACE)
     write["datatype"].setValue(config.WRITE_DATATYPE)
     write["create_directories"].setValue(True)
+    # # The Write carries its own stamp, so send-back doesn't depend on the B pipe reaching the Read.
+    stamp.write_stamp(write, stamp.Stamp.from_shot(shot))
     return write
 
 
@@ -173,7 +144,7 @@ def build(shot: ShotInfo, options: ShotOptions | None = None) -> BuildResult:
             root["first_frame"].setValue(range_before[0])
             root["last_frame"].setValue(range_before[1])
         if options.create_write:
-            write = _create_write(read)
+            write = _create_write(read, shot)
     finally:
         nuke.Undo.end()
 

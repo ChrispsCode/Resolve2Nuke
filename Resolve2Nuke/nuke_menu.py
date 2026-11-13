@@ -16,5 +16,6 @@ from Resolve2Nuke import config
 def build() -> None:
     menu = nuke.menu("Nodes").addMenu(config.MENU_NAME, icon=config.ICON_PATH)
     menu.addCommand("Pull shot from Resolve", "__import__('Resolve2Nuke').pull_shot()", icon=config.ICON_PATH)
+    menu.addCommand("Send comp to Resolve", "__import__('Resolve2Nuke').send_comp()", icon=config.ICON_PATH)
     menu.addSeparator()
     menu.addCommand("Dev/Reload Resolve2Nuke", "__import__('Resolve2Nuke').reload()")
