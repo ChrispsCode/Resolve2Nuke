@@ -75,12 +75,24 @@ WRITE_DATATYPE = "16 bit half"
 # #----------------------------------------------------------------------------
 # # Send back
 
-# # Media pool bin (top level) that rendered comps are imported into
-RESOLVE_BIN = "VFX"
+# # Media pool bin for rendered comps. TCL is evaluated, "/" makes nested bins.
+# # If it can't be evaluated (e.g. not hozed, so SHOT_NAME is unset) it falls back.
+DEFAULT_BIN = "VFX/[getenv SHOT_NAME]"
+FALLBACK_BIN = "VFX"
 
 # # Default placement: "follow_clip" (find the original clip wherever it is now,
 # # align by source frame), "stored" (where it was at pull time) or "playhead"
 DEFAULT_PLACEMENT = "follow_clip"
+
+# #----------------------------------------------------------------------------
+# # Dialogs
+
+# # Remember the last-used fps source, handles, placement and bin per user
+# # (QSettings). The checkboxes always start ticked, so a secondary-plate pull
+# # never leaves the next main-plate pull half set up.
+REMEMBER_SETTINGS = True
+SETTINGS_ORG = "Resolve2Nuke"
+SETTINGS_APP = "Resolve2Nuke"
 
 # #----------------------------------------------------------------------------
 # # Knobs added to the Read to remember where it came from in Resolve.

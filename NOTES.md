@@ -36,6 +36,24 @@ Every root change is a toggle in `shot_build.ShotOptions`, ready for the GUI. Br
 
 **Stamps:** pull adds a **Resolve2Nuke** tab (`r2n_*` knobs, see `stamp.py`) to the Read *and* the Write. On send-back the Write's own stamp wins. Walking up the B pipe to a stamped Read is only a fallback, for hand-made Writes. If both exist and name different clips, it warns and uses the Write's.
 
+### 3. Dialogs (v0.3.0)
+
+In the GUI, both menu commands open a non-modal dialog (`dialogs.py`). With `options` passed, or headless, `pull_shot()` and `send_comp()` still run straight away.
+
+- **Pull dialog:**
+  - a summary of the shot;
+  - checkboxes for each `ShotOptions` root setting, always starting ticked;
+  - fps source (greyed out when the clip and timeline rates match);
+  - handles;
+  - Refresh / Pull / Cancel.
+- **Send dialog:**
+  - the Write, its frame check and its stamp;
+  - placement mode;
+  - a **bin** line edit, defaulting to `config.DEFAULT_BIN` = `VFX/[getenv SHOT_NAME]`. TCL is evaluated, "/" makes nested bins created level by level, and it falls back to `VFX` if evaluation fails (e.g. not hozed);
+  - a **live preview** ("→ V3 at 01:00:00:00, 39 frames") from `resolve_bridge.plan_placement()`. That's a dry run that changes nothing in Resolve, and `place_comp()` carries out the same plan.
+- **Shared logic:** `actions.py` holds the run-and-report logic used by both the dialogs and the direct calls.
+- **Remembered settings:** `settings.py` remembers fps source, handles, placement and bin per user in QSettings, when `config.REMEMBER_SETTINGS` is True. The checkboxes always start ticked, so a secondary-plate pull never leaves the next main-plate pull half set up.
+
 ## Decisions and why
 
 - **Nuke 17.1+ only.** 17.1's BRAW reader uses SDK 5.1 (15.2's uses 2.2, Resolve 21 uses 5.x). `DaVinciResolveScript` imports in-process in 17.1, while in 15.2 Resolve's `fusionscript.so` fails on a libc++ symbol clash. `menu.py` prints a red warning in 15.
@@ -90,4 +108,5 @@ Every root change is a toggle in `shot_build.ShotOptions`, ready for the GUI. Br
   - `config.py` holds the constants.
 - **Entry points** (also the menu commands, so keep the names): `Resolve2Nuke.pull_shot()`, `Resolve2Nuke.send_comp()`. Reload with `Resolve2Nuke.reload()`.
 - **Don't name a module after a package-level function.** `send_comp()` shadowed a `send_comp` module, which was renamed `send_back`.
-- **Testing:** run headless Nuke 17.1 (`-ti`) with Resolve open on the VFX Test project. The test scripts lived in the session scratchpad; they're worth moving into a `tests/` folder.
+- **Testing:** run headless Nuke 17.1 (`-ti`) with Resolve open on the VFX Test project. The test script builds its own **"R2N Test"** timeline each run (the BRAW, source 107–145, at 01:00:00:00), and only deletes the bins it creates. It never touches the timeline you're working on. (A first version cleaned up all of V2 and above and the whole VFX bin on the current timeline, and wiped Harry's GUI-test comps.) For a movie clip, `AppendToTimeline` takes 0-based `startFrame` and an exclusive `endFrame`, so (106, 145) gives left offset 106 and 39 frames.
+- Widgets can't be created headless. Keep logic in the Qt-free modules (`send_back`, `shot_build`, `settings`, `actions`), and leave the dialogs to a GUI checklist.

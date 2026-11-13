@@ -7,12 +7,15 @@ plate it was pulled from.
 
 The Write's own stamp is the source of truth. Walking up the B pipe to a
 stamped Read is only a fallback, for Writes that weren't made by the pull.
+
+Everything here is Qt-free so it can be tested headless. The send dialog is
+a thin layer over gather(), preview() and send().
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import nuke
 
@@ -29,6 +32,35 @@ class SendError(RuntimeError):
 @dataclass
 class SendOptions:
     placement: str = config.DEFAULT_PLACEMENT
+    bin: str = config.DEFAULT_BIN   # TCL, evaluated at send time
+
+
+@dataclass
+class SendInfo:
+    """Everything about a Write that the send needs, gathered without touching Resolve."""
+    write: nuke.Node
+    stamp: stamp_mod.Stamp
+    first: int
+    last: int
+    missing: list[int]
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def frame_count(self) -> int:
+        return self.last - self.first + 1
+
+    def comp(self) -> resolve_bridge.CompPlacement:
+        return resolve_bridge.CompPlacement(
+            sequence_path=nuke.filename(self.write),
+            first=self.first,
+            last=self.last,
+            project=self.stamp.project,
+            timeline=self.stamp.timeline,
+            item_id=self.stamp.item_id,
+            track=self.stamp.track,
+            record_in=self.stamp.record_in,
+            source_first=self.stamp.source_first,
+        )
 
 
 # #----------------------------------------------------------------------------
@@ -78,8 +110,10 @@ def missing_frames(write: nuke.Node, first: int, last: int) -> list[int]:
     return [f for f in range(first, last + 1) if not os.path.isfile(write["file"].evaluate(f))]
 
 
-def _format_frames(frames: list[int]) -> str:
+def format_frames(frames: list[int]) -> str:
     """[107, 108, 109, 120] -> '107-109, 120'"""
+    if not frames:
+        return ""
     runs, start, prev = [], frames[0], frames[0]
     for f in frames[1:] + [None]:
         if f is not None and f == prev + 1:
@@ -91,34 +125,53 @@ def _format_frames(frames: list[int]) -> str:
     return ", ".join(runs)
 
 
-# #----------------------------------------------------------------------------
-# # Entry point
+def evaluate_bin(text: str) -> tuple[str, str | None]:
+    """(bin path, why it fell back or None). TCL like [getenv SHOT_NAME] is evaluated."""
+    try:
+        path = "/".join(resolve_bridge.split_bin_path(nuke.tcl("subst", text)))
+    except RuntimeError as e:
+        return config.FALLBACK_BIN, f"couldn't evaluate '{text}' ({e})"
+    if not path:
+        return config.FALLBACK_BIN, f"'{text}' evaluated to nothing"
+    return path, None
 
-def send(write: nuke.Node | None = None, options: SendOptions | None = None) -> resolve_bridge.PlaceResult:
-    """Check the render, then place it in Resolve. Raises SendError / ResolveError."""
-    options = options or SendOptions()
+
+def gather(write: nuke.Node | None = None) -> SendInfo:
+    """Find the Write and check its render. Raises SendError when there's nothing sendable."""
     write = write or find_write()
     if write["file_type"].value() != "exr":
         raise SendError(f"{write.name()} isn't writing EXRs.")
-
     stamp, warnings = find_stamp(write)
     first, last = frame_range(write)
-    missing = missing_frames(write, first, last)
-    if missing:
-        raise SendError(f"{write.name()} is missing {len(missing)} of {last - first + 1} frames "
-                        f"({_format_frames(missing)}).\nRender {first}-{last} first.")
+    return SendInfo(write=write, stamp=stamp, first=first, last=last,
+                    missing=missing_frames(write, first, last), warnings=warnings)
 
-    comp = resolve_bridge.CompPlacement(
-        sequence_path=nuke.filename(write),
-        first=first,
-        last=last,
-        project=stamp.project,
-        timeline=stamp.timeline,
-        item_id=stamp.item_id,
-        track=stamp.track,
-        record_in=stamp.record_in,
-        source_first=stamp.source_first,
-    )
-    result = resolve_bridge.place_comp(comp, options.placement)
-    result.warnings[:0] = warnings
+
+# #----------------------------------------------------------------------------
+# # Entry points
+
+def preview(info: SendInfo, options: SendOptions) -> resolve_bridge.PlacementPlan:
+    """Where the comp would land. Changes nothing in Resolve."""
+    bin_path, fallback = evaluate_bin(options.bin)
+    plan = resolve_bridge.plan_placement(info.comp(), options.placement, bin_path)
+    if fallback:
+        plan.warnings.insert(0, f"Bin {fallback}, so using '{bin_path}'.")
+    plan.warnings[:0] = info.warnings
+    return plan
+
+
+def send(write: nuke.Node | None = None, options: SendOptions | None = None,
+         info: SendInfo | None = None) -> resolve_bridge.PlaceResult:
+    """Check the render, then place it in Resolve. Raises SendError / ResolveError."""
+    options = options or SendOptions()
+    info = info or gather(write)
+    if info.missing:
+        raise SendError(f"{info.write.name()} is missing {len(info.missing)} of {info.frame_count} frames "
+                        f"({format_frames(info.missing)}).\nRender {info.first}-{info.last} first.")
+
+    bin_path, fallback = evaluate_bin(options.bin)
+    result = resolve_bridge.place_comp(info.comp(), options.placement, bin_path)
+    if fallback:
+        result.warnings.insert(0, f"Bin {fallback}, so used '{bin_path}'.")
+    result.warnings[:0] = info.warnings
     return result

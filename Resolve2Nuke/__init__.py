@@ -11,59 +11,41 @@ Script Editor:
 
 from __future__ import annotations
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def pull_shot(options=None):
-    """Menu entry point. Shows a dialog for anything the artist must not miss."""
+    """Menu entry point. In the GUI, opens the pull dialog. With options (or
+    headless), pulls straight away."""
     import nuke
 
-    from Resolve2Nuke import logger, resolve_bridge, shot_build
+    if options is None and nuke.GUI:
+        from Resolve2Nuke import dialogs
+        dialogs.open_pull_dialog()
+        return None
+
+    from Resolve2Nuke import actions, resolve_bridge
 
     try:
         shot = resolve_bridge.get_shot()
     except resolve_bridge.ResolveError as e:
-        logger.error(str(e))
-        nuke.message(f"Resolve2Nuke:\n\n{e}")
+        actions.report_error(e)
         return None
-
-    result = shot_build.build(shot, options)
-
-    if result.unknown_colorspace:
-        msg = (f"Unknown colour space: '{shot.resolve_colorspace}'\n\n"
-               f"{result.read.name()} was left on its default colorspace, so it probably "
-               f"won't match Resolve. Set it by hand, and add the mapping to "
-               f"Resolve2Nuke config.RESOLVE_TO_OCIO once it's been tested.")
-        logger.warning(msg.replace("\n\n", " "))
-        nuke.message(f"Resolve2Nuke:\n\n{msg}")
-
-    logger.info(f"Created {result.read.name()}" + (f" and {result.write.name()}" if result.write else ""))
-    return result
+    return actions.run_pull(shot, options)
 
 
 def send_comp(options=None):
-    """Menu entry point: send the selected (or only) Write's render to Resolve."""
+    """Menu entry point. In the GUI, opens the send dialog. With options (or
+    headless), sends the selected (or only) Write straight away."""
     import nuke
 
-    from Resolve2Nuke import logger, resolve_bridge, send_back as send_mod
-
-    try:
-        result = send_mod.send(options=options)
-    except (send_mod.SendError, resolve_bridge.ResolveError) as e:
-        logger.error(str(e))
-        nuke.message(f"Resolve2Nuke:\n\n{e}")
+    if options is None and nuke.GUI:
+        from Resolve2Nuke import dialogs
+        dialogs.open_send_dialog()
         return None
 
-    summary = (f"Placed {result.clip_name}\non V{result.track} at {result.record_in_tc} "
-               f"({result.record_out - result.record_in + 1} frames, {result.placement.replace('_', ' ')}).")
-    if result.reused_media:
-        summary += "\n\nReused the clip already in the media pool."
-    if result.warnings:
-        for w in result.warnings:
-            logger.warning(w)
-        summary += "\n\nWarnings:\n- " + "\n- ".join(result.warnings)
-    nuke.message(f"Resolve2Nuke:\n\n{summary}")
-    return result
+    from Resolve2Nuke import actions
+    return actions.run_send(options)
 
 
 def reload() -> None:

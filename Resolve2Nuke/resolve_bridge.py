@@ -253,13 +253,31 @@ class CompPlacement:
 
 
 @dataclass
+class PlacementPlan:
+    """Where a comp would land. Working it out changes nothing in Resolve."""
+    placement: str           # the mode actually used (follow_clip can fall back to stored)
+    track: int               # may be above the timeline's current track count
+    record_in: int
+    record_out: int
+    record_in_tc: str
+    bin_path: str
+    reuse_media: bool        # the sequence is already in that bin
+    warnings: list
+
+    @property
+    def duration(self) -> int:
+        return self.record_out - self.record_in + 1
+
+
+@dataclass
 class PlaceResult:
-    placement: str           # the mode actually used
+    placement: str
     track: int
     record_in: int
     record_out: int
     record_in_tc: str
     clip_name: str
+    bin_path: str
     reused_media: bool
     warnings: list
 
@@ -282,7 +300,7 @@ def _anchor(timeline, comp: CompPlacement, placement: str, warnings: list) -> tu
             record = item.GetStart() + (comp.first - item_source_first(item))
             return "follow_clip", record, item.GetTrackTypeAndIndex()[1]
         warnings.append("The original clip isn't in the timeline any more (deleted or replaced), "
-                        "so the comp was placed at the position stored when the shot was pulled.")
+                        "so the comp goes at the position stored when the shot was pulled.")
         placement = "stored"
 
     if placement == "stored":
@@ -300,6 +318,8 @@ def _anchor(timeline, comp: CompPlacement, placement: str, warnings: list) -> tu
 
 
 def _track_is_free(timeline, track: int, record_in: int, record_out: int) -> bool:
+    if track > timeline.GetTrackCount("video"):
+        return True
     for item in timeline.GetItemListInTrack("video", track) or []:
         if item.GetStart() <= record_out and item.GetEnd() - 1 >= record_in:
             return False
@@ -307,24 +327,33 @@ def _track_is_free(timeline, track: int, record_in: int, record_out: int) -> boo
 
 
 def _free_track_above(timeline, base_track: int, record_in: int, record_out: int) -> int:
-    """The first track above base_track that's empty for the range, adding tracks as needed."""
+    """The first track above base_track that's empty for the range (may not exist yet)."""
     track = base_track + 1
-    while track <= timeline.GetTrackCount("video") and not _track_is_free(timeline, track, record_in, record_out):
+    while not _track_is_free(timeline, track, record_in, record_out):
         track += 1
-    while timeline.GetTrackCount("video") < track:
-        if not timeline.AddTrack("video"):
-            raise ResolveError("Couldn't add a video track to the timeline.")
     return track
 
 
-def _vfx_bin(media_pool):
-    root = media_pool.GetRootFolder()
-    for folder in root.GetSubFolderList() or []:
-        if folder.GetName() == config.RESOLVE_BIN:
-            return folder
-    folder = media_pool.AddSubFolder(root, config.RESOLVE_BIN)
-    if not folder:
-        raise ResolveError(f"Couldn't create the '{config.RESOLVE_BIN}' bin in the media pool.")
+# #----------------------------------------------------------------------------
+# # Bins
+
+def split_bin_path(bin_path: str) -> list[str]:
+    """'VFX//shot/' -> ['VFX', 'shot']"""
+    return [part.strip() for part in bin_path.replace("\\", "/").split("/") if part.strip()]
+
+
+def _find_bin(media_pool, bin_path: str, create: bool):
+    """The bin at bin_path under the media pool root, created level by level when asked."""
+    folder = media_pool.GetRootFolder()
+    for name in split_bin_path(bin_path):
+        child = next((f for f in folder.GetSubFolderList() or [] if f.GetName() == name), None)
+        if child is None:
+            if not create:
+                return None
+            child = media_pool.AddSubFolder(folder, name)
+            if not child:
+                raise ResolveError(f"Couldn't create the bin '{name}' in '{bin_path}'.")
+        folder = child
     return folder
 
 
@@ -335,14 +364,14 @@ def _resolve_sequence_name(sequence_path: str, first: int, last: int) -> str:
     return sequence_path[:match.start()] + f"[{first:0{pad}d}-{last:0{pad}d}]" + sequence_path[match.end():]
 
 
-def _import_sequence(media_pool, comp: CompPlacement) -> tuple[object, bool]:
-    """(media pool item, whether an existing one was reused)."""
-    folder = _vfx_bin(media_pool)
+def _existing_clip(folder, comp: CompPlacement):
+    if folder is None:
+        return None
     resolve_path = _resolve_sequence_name(comp.sequence_path, comp.first, comp.last)
-    for clip in folder.GetClipList() or []:
-        if clip.GetClipProperty("File Path") == resolve_path:
-            return clip, True
+    return next((c for c in folder.GetClipList() or [] if c.GetClipProperty("File Path") == resolve_path), None)
 
+
+def _import_sequence(media_pool, folder, comp: CompPlacement):
     previous = media_pool.GetCurrentFolder()
     media_pool.SetCurrentFolder(folder)
     try:
@@ -352,18 +381,29 @@ def _import_sequence(media_pool, comp: CompPlacement) -> tuple[object, bool]:
             media_pool.SetCurrentFolder(previous)
     if not items:
         raise ResolveError(f"Resolve couldn't import {comp.sequence_path} ({comp.first}-{comp.last}).")
-    return items[0], False
+    return items[0]
 
 
-def place_comp(comp: CompPlacement, placement: str = "follow_clip", resolve=None) -> PlaceResult:
-    """Import a rendered comp and put it on the timeline above its plate."""
-    resolve = resolve or connect()
+# #----------------------------------------------------------------------------
+# # Plan and place
+
+def _current(resolve):
     project = resolve.GetProjectManager().GetCurrentProject()
     if not project:
         raise ResolveError("Resolve has no project open.")
     timeline = project.GetCurrentTimeline()
     if not timeline:
         raise ResolveError(f"Project '{project.GetName()}' has no timeline open.")
+    return project, timeline
+
+
+def plan_placement(comp: CompPlacement, placement: str = "follow_clip", bin_path: str = "VFX",
+                   resolve=None) -> PlacementPlan:
+    """Where the comp would land. Read-only: nothing in Resolve changes."""
+    resolve = resolve or connect()
+    project, timeline = _current(resolve)
+    if not split_bin_path(bin_path):
+        raise ResolveError("The bin name is empty.")
 
     warnings = []
     if project.GetName() != comp.project:
@@ -372,26 +412,48 @@ def place_comp(comp: CompPlacement, placement: str = "follow_clip", resolve=None
         warnings.append(f"Resolve's timeline is '{timeline.GetName()}', but the shot came from '{comp.timeline}'.")
 
     used, record_in, base_track = _anchor(timeline, comp, placement, warnings)
-    duration = comp.last - comp.first + 1
-    record_out = record_in + duration - 1
+    record_out = record_in + (comp.last - comp.first)
     track = _free_track_above(timeline, base_track, record_in, record_out)
+    folder = _find_bin(project.GetMediaPool(), bin_path, create=False)
+    fps = float(timeline.GetSetting("timelineFrameRate"))
+    return PlacementPlan(placement=used, track=track, record_in=record_in, record_out=record_out,
+                         record_in_tc=_frame_to_timecode(record_in, fps), bin_path="/".join(split_bin_path(bin_path)),
+                         reuse_media=_existing_clip(folder, comp) is not None, warnings=warnings)
+
+
+def place_comp(comp: CompPlacement, placement: str = "follow_clip", bin_path: str = "VFX",
+               resolve=None) -> PlaceResult:
+    """Import a rendered comp and put it on the timeline above its plate."""
+    resolve = resolve or connect()
+    project, timeline = _current(resolve)
+    plan = plan_placement(comp, placement, bin_path, resolve)
+
+    while timeline.GetTrackCount("video") < plan.track:
+        if not timeline.AddTrack("video"):
+            raise ResolveError("Couldn't add a video track to the timeline.")
 
     media_pool = project.GetMediaPool()
-    clip, reused = _import_sequence(media_pool, comp)
+    folder = _find_bin(media_pool, plan.bin_path, create=True)
+    clip = _existing_clip(folder, comp)
+    reused = clip is not None
+    if clip is None:
+        clip = _import_sequence(media_pool, folder, comp)
 
     # # For sequences, start/endFrame are file frame numbers and endFrame is exclusive.
     placed = media_pool.AppendToTimeline([{"mediaPoolItem": clip, "startFrame": comp.first, "endFrame": comp.last + 1,
-                                           "trackIndex": track, "recordFrame": record_in}])
+                                           "trackIndex": plan.track, "recordFrame": plan.record_in}])
     if not placed:
-        raise ResolveError(f"Resolve couldn't place the comp on V{track} at frame {record_in}.")
+        raise ResolveError(f"Resolve couldn't place the comp on V{plan.track} at frame {plan.record_in}.")
     item = placed[0]
-    if (item.GetStart(), item.GetDuration()) != (record_in, duration):
+    warnings = list(plan.warnings)
+    if (item.GetStart(), item.GetDuration()) != (plan.record_in, plan.duration):
         warnings.append(f"Resolve placed the comp at {item.GetStart()} for {item.GetDuration()} frames, "
-                        f"expected {record_in} for {duration}.")
+                        f"expected {plan.record_in} for {plan.duration}.")
 
     fps = float(timeline.GetSetting("timelineFrameRate"))
-    result = PlaceResult(placement=used, track=track, record_in=item.GetStart(), record_out=item.GetEnd() - 1,
-                         record_in_tc=_frame_to_timecode(item.GetStart(), fps), clip_name=clip.GetName(),
-                         reused_media=reused, warnings=warnings)
-    logger.info(f"Placed {result.clip_name} on V{track} at {result.record_in_tc} ({used})")
+    result = PlaceResult(placement=plan.placement, track=plan.track, record_in=item.GetStart(),
+                         record_out=item.GetEnd() - 1, record_in_tc=_frame_to_timecode(item.GetStart(), fps),
+                         clip_name=clip.GetName(), bin_path=plan.bin_path, reused_media=reused, warnings=warnings)
+    logger.info(f"Placed {result.clip_name} on V{result.track} at {result.record_in_tc} ({result.placement}), "
+                f"bin {result.bin_path}")
     return result
