@@ -300,14 +300,24 @@ try:
     check("template: first is v01, EXR path", t1.version == 1 and t1.path.endswith("test_tree_sc010_sh010_plate_v01/test_tree_sc010_sh010_plate_v01.%04d.exr"), t1.path)
 
     def resolve_state():
+        # # Render queries (job list, presets, render mode) switch Resolve to the
+        # # Deliver page, so read the page first and put it back afterwards.
+        page = resolve.GetCurrentPage()
+        state = _resolve_state(page)
+        if page and resolve.GetCurrentPage() != page:
+            resolve.OpenPage(page)
+        return state
+
+    def _resolve_state(page):
         presets = [p for p in project.GetRenderPresetList() if p.startswith("R2N_restore_")]
         temps = [project.GetTimelineByIndex(i).GetName() for i in range(1, project.GetTimelineCount() + 1)
                  if project.GetTimelineByIndex(i).GetName().startswith("R2N template ")]
         staging = [f for f in os.listdir(config.TEMPLATE_STAGING_DIR)] if os.path.isdir(config.TEMPLATE_STAGING_DIR) else []
-        return (project.GetSetting("colorSpaceOutput"), project.GetCurrentRenderMode(), project.GetCurrentTimeline().GetName(),
+        return (page, project.GetSetting("colorSpaceOutput"), project.GetCurrentRenderMode(), project.GetCurrentTimeline().GetName(),
                 project.GetRenderJobList(), presets, temps, staging, project.IsRenderingInProgress(),
                 project.GetSetting("timelineResolutionWidth"), project.GetSetting("timelineResolutionHeight"))
 
+    resolve.OpenPage("edit")
     before = resolve_state()
     nuke.scriptClear()
     messages.clear()
@@ -368,7 +378,7 @@ try:
         before_tl1 = resolve_state()
         full = template_render.render_template(canon_shot, "exr", True)
         small = template_render.render_template(canon_shot, "exr", False)
-        check("canon template: Resolve restored", resolve_state()[:6] == before_tl1[:6] and resolve_state()[7:] == before_tl1[7:],
+        check("canon template: Resolve restored", resolve_state()[:7] == before_tl1[:7] and resolve_state()[8:] == before_tl1[8:],
               (before_tl1, resolve_state()))
         rf = nuke.nodes.Read(file=os.path.join(full.folder, os.path.basename(full.files[0])))
         rs = nuke.nodes.Read(file=os.path.join(small.folder, os.path.basename(small.files[0])))
@@ -381,6 +391,58 @@ try:
         shutil.rmtree(full.folder, ignore_errors=True)
         shutil.rmtree(small.folder, ignore_errors=True)
         project.SetCurrentTimeline(timeline)
+
+    # #================ GRADE LUT
+    from Resolve2Nuke import grade_lut
+    g1 = grade_lut.lut_path()
+    check("grade: first LUT is v01 in plates", g1.endswith("plates/test_tree_sc010_sh010_grade_v01.cube"), g1)
+    page_before = resolve.GetCurrentPage()
+    nuke.scriptClear()
+    messages.clear()
+    res = actions.run_pull(shot, shot_build.ShotOptions(include_grade=True))
+    check("grade: ungraded clip -> quietly no group, no LUT left", res.grade is None and not messages and not os.path.exists(g1), messages)
+    check("grade: Resolve back on its page", resolve.GetCurrentPage() == page_before, (page_before, resolve.GetCurrentPage()))
+    graded_item = next((i for i in (tl1.GetItemListInTrack("video", 1) if tl1 else []) or []
+                        if i.GetName().startswith("A001") and i.GetStart() == 86520), None)
+    if graded_item is None:
+        print("SKIP  grade LUT: no A001 instance at 86520 on Timeline 1")
+    else:
+        graded_shot = resolve_bridge._shot_from_item(resolve, project, tl1, graded_item)
+        nuke.scriptClear()
+        messages.clear()
+        res = actions.run_pull(graded_shot, shot_build.ShotOptions(include_grade=True))
+        grp = res.grade
+        if grp is None and not messages:
+            print("SKIP  grade LUT: the A001 instance at 86520 isn't graded")
+        else:
+            check("grade: group made, no error", grp is not None and not messages, messages)
+            check("grade: LUT v01 written, not an identity", os.path.isfile(g1) and not resolve_bridge.cube_is_identity(g1))
+            check("grade: branch off the Read, Write still on the Read", grp.input(0) is res.read and res.write.input(0) is res.read)
+            check("grade: group shows the LUT file", grp["vfield_file"].value() == g1, grp["vfield_file"].value())
+            check("grade: next LUT is v02", grade_lut.lut_path().endswith("_grade_v02.cube"))
+            check("grade: Resolve back on its page", resolve.GetCurrentPage() == page_before)
+            project.SetCurrentTimeline(tl1)
+            plate = template_render.render_template(graded_shot, "exr", True)
+            project.SetCurrentTimeline(timeline)
+            tp = nuke.nodes.Read()
+            tp["file"].fromUserText(plate.files[0].rsplit(".", 2)[0] + f".%08d.exr {graded_shot.source_first}-{graded_shot.source_last}")
+            tp["colorspace"].setValue(config.TEMPLATE_COLORSPACE)
+            to_bmd = lambda n: nuke.nodes.OCIOColorSpace(inputs=[n], in_colorspace="scene_linear", out_colorspace="BMDFilm WideGamut Gen5")
+            a, b, c0 = to_bmd(grp), to_bmd(tp), to_bmd(res.read)
+            pts = [(x * 400 + .5, y * 300 + .5) for x in range(1, 10) for y in range(1, 7)]
+            f = graded_shot.source_first
+            d = sorted(abs(a.sample(ch, x, y, frame=f) - b.sample(ch, x, y, frame=f)) for x, y in pts for ch in ("rgba.red", "rgba.green", "rgba.blue"))
+            d0 = sorted(abs(c0.sample(ch, x, y, frame=f) - b.sample(ch, x, y, frame=f)) for x, y in pts for ch in ("rgba.red", "rgba.green", "rgba.blue"))
+            check("grade: group matches Resolve's graded plate", d[len(d) // 2] < 0.002 and d0[len(d0) // 2] > 0.01,
+                  (round(d[len(d) // 2], 5), "ungraded:", round(d0[len(d0) // 2], 5)))
+            shutil.rmtree(plate.folder, ignore_errors=True)
+    saved_root = os.environ.pop("SHOT_ROOT")
+    try:
+        grade_lut.lut_path()
+        check("grade not hozed: raises", False)
+    except grade_lut.GradeError as e:
+        check("grade not hozed: raises", "hoz" in str(e))
+    os.environ["SHOT_ROOT"] = saved_root
 
     # # Not hozed: a clear error, no render
     saved_root = os.environ.pop("SHOT_ROOT")

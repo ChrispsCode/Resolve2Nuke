@@ -235,6 +235,57 @@ def _covers_one_frame_each(item, clip_fps: float) -> bool:
     return abs(covered - item.GetDuration()) < 0.6
 
 
+def cube_is_identity(path: str, tolerance: float = 1e-4) -> bool:
+    """Whether a .cube 3D LUT changes nothing (an ungraded clip exports one)."""
+    values = []
+    with open(path) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) == 3:
+                try:
+                    values.append(tuple(float(v) for v in parts))
+                except ValueError:
+                    continue
+    n = round(len(values) ** (1 / 3))
+    if n < 2 or n ** 3 != len(values):
+        return False
+    for i, (r, g, b) in enumerate(values):  # # red changes fastest
+        if (abs(r - (i % n) / (n - 1)) > tolerance or abs(g - (i // n % n) / (n - 1)) > tolerance
+                or abs(b - (i // (n * n)) / (n - 1)) > tolerance):
+            return False
+    return True
+
+
+def export_grade_lut(shot: ShotInfo, path: str, resolve=None) -> bool:
+    """Export the clip's grade as a .cube LUT. Returns whether it holds a grade
+    (False: an identity, the clip isn't graded).
+
+    ExportLUT only works on the Color page (it returns False on the Edit page,
+    verified 2026-11-14), so this switches there and back. It also won't
+    overwrite, so path must be new."""
+    resolve = resolve or connect()
+    project = resolve.GetProjectManager().GetCurrentProject()
+    timeline = next((project.GetTimelineByIndex(i) for i in range(1, project.GetTimelineCount() + 1)
+                     if project.GetTimelineByIndex(i).GetName() == shot.timeline_name), None)
+    item = find_item_by_id(timeline, shot.item_id) if timeline else None
+    if item is None:
+        raise ResolveError("The clip isn't in its timeline any more, so its grade can't be exported.")
+    if os.path.exists(path):
+        raise ResolveError(f"{path} already exists. Not overwriting it.")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    page = resolve.GetCurrentPage() or "edit"
+    try:
+        if page != "color":
+            resolve.OpenPage("color")
+        exported = item.ExportLUT(getattr(resolve, config.GRADE_LUT_SIZE), path)
+    finally:
+        if page != "color":
+            resolve.OpenPage(page)
+    if not exported or not os.path.isfile(path):
+        raise ResolveError(f"Resolve couldn't export the grade LUT to {path}.")
+    return not cube_is_identity(path)
+
+
 def _shot_from_item(resolve, project, timeline, item) -> ShotInfo:
     mpi = item.GetMediaPoolItem()
     props = mpi.GetClipProperty()

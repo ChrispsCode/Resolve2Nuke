@@ -93,6 +93,15 @@ A **Template plate** option in the pull dialog (off by default, only when hozed)
   - A ProRes template of a 50% clip matches the Kronos frame for frame (median 0.0002), so Resolve's Nearest retime and our keys agree.
   - The 0.856× remap seen with DaVinci Intermediate output doesn't happen with BMD Film output.
 
+### 6. Grade LUT (v0.6.0)
+
+**Include grade (LUT)** in the pull dialog's Script settings (off by default, hozed only) gives a reference view of the clip's Resolve grade. It's not for baking: the grade is copied onto the comp in Resolve.
+
+- **Resolve side:** `TimelineItem.ExportLUT` writes a 65-point `.cube` to `$SHOT_ROOT/plates/<SHOT_NAME>_grade_v##.cube`, versioned, since ExportLUT won't overwrite. It only works on the **Color page**, so the tool switches there and back. An identity LUT means there's no grade: the file is deleted and the artist is told.
+- **What the LUT is:** **the grade only**, applied in the timeline working space (DaVinci WG/Intermediate). An ungraded clip exports an exact identity. Verified 2026-11-14: hero BRAW → DaVinci Intermediate → LUT matches Resolve's graded template plate to a median of 0.0006 (0.02 off if applied in BMD Film, 0.035 with no LUT).
+- **The dialog ticks it by default** (it sits above Create Write). An ungraded clip is then skipped quietly, with a log line. Scripted `ShotOptions` keep `include_grade=False` unless asked.
+- **Nuke side (`grade_lut.py`):** a **ResolveGrade** Group holding OCIOColorSpace (scene_linear → DaVinci Intermediate WideGamut) → Vectorfield → OCIOColorSpace (back), because Vectorfield's own colorspace knobs only list Nuke's 26 built-in curves. The LUT file is exposed on the Group. The Group branches off the Read (or the Kronos) and is never in the Write's pipe.
+
 ## Decisions and why
 
 - **Nuke 17.1+ only.** 17.1's BRAW reader uses SDK 5.1 (15.2's uses 2.2, Resolve 21 uses 5.x). `DaVinciResolveScript` imports in-process in 17.1, while in 15.2 Resolve's `fusionscript.so` fails on a libc++ symbol clash. `menu.py` prints a red warning in 15.
@@ -134,6 +143,12 @@ A **Template plate** option in the pull dialog (off by default, only when hozed)
 - **The mapped Media Storage** (2026-11-14): `~/Videos`, `~/DaVinci Resolve Media`, `~/Documents/DevTest`.
 - **Never switch a timeline to custom settings for a render** (`SetSetting("useCustomSettings", "1")`). It changes that timeline's colour science from `davinciYRGBColorManagedv2` to plain `davinciYRGB`, i.e. unmanaged, and the render passes the decode straight through. A BRAW still looks right (its decode *is* BMD Film), which hid the bug. A Canon came out as raw Canon Log 3, read as BMD Film: "crunchy and contrasty" (Harry, 2026-11-14). Colour science and the timeline colour space can be set back on a custom timeline, but its output and input colour spaces can't (`SetSetting` returns False). Template plates at the clip's resolution therefore change the *project's* timeline resolution and restore it, and refuse to render from a timeline that isn't colour managed.
 - **`StopRendering()` is asynchronous.** Wait until `IsRenderingInProgress()` is False before touching the job or the timeline. Deleting the timeline being rendered left Resolve hung, and it needed a force quit (2026-11-14). The template cleanup now waits up to 30 s, and if Resolve still hasn't stopped, it leaves the job and the copy in place and says so.
+- **Resolve's page matters to the API:**
+  - `TimelineItem.ExportLUT` returns False unless the **Color** page is open.
+  - **Render calls switch Resolve to the Deliver page** (`AddRenderJob` does, and so did one of the render queries before it).
+  - `GetSelectedClips()` depends on the page: on Color it returns the current colour clip, and on Deliver, Deliver's current clip. So a pull made while Resolve sat on Deliver after a template render would take a stale clip for the artist's selection.
+  
+  The tool reads the page **before** any render call and puts it back. Tests that query render state must do the same.
 - **`Timeline.DuplicateTimeline()` makes the copy the current timeline.** Rendering needs it current anyway.
 - **`ClipStartFrame`** in `SetRenderSettings` sets an image sequence's first frame number (8-digit padding). Movies ignore it, and carry the record timecode instead.
 - **The render state to restore:** `GetSetting("colorSpaceOutput")`, `GetCurrentRenderMode()`, and the Deliver settings via `SaveAsNewRenderPreset` / `LoadRenderPreset` / `DeleteRenderPreset`.
@@ -146,6 +161,7 @@ A **Template plate** option in the pull dialog (off by default, only when hozed)
 - [ ] GUI for pull (`ShotOptions` as checkboxes, with fps source greyed out when the clip and timeline match, plus a confirmation) and for send (placement mode, plus a bin line edit defaulting to `VFX/[SHOT_NAME]` so many shots and versions stay tidy; nested bins need creating level by level).
 - [x] Retimes: Kronos (Frame) from Resolve's curve (v0.4.0).
 - [x] Template plates (v0.5.0).
+- [x] Grade LUT reference branch (v0.6.0).
 - [ ] A separate tool (another repo) to convert camera files Nuke can't read, for full-range hero plates.
 - [ ] Versioned Write paths (the `v01` is hard-coded). Harry plans a better path setter.
 - [ ] More pixel-tested colour mappings. Canon may not need one: template plates come out as BMD Film.

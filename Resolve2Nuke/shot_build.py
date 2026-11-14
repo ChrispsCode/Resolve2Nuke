@@ -31,6 +31,8 @@ class ShotOptions:
     set_frame_range: bool = True
     handles: int = 0
     create_write: bool = True
+    # # A reference branch with the clip's Resolve grade as a LUT (grade_lut.py)
+    include_grade: bool = False
     # # Template plate: Resolve renders the clip with its effects (template_plate.py).
     render_template: bool = False
     template_format: str = config.DEFAULT_TEMPLATE_FORMAT
@@ -44,6 +46,7 @@ class BuildResult:
     unknown_colorspace: bool
     kronos: nuke.Node | None = None
     template: nuke.Node | None = None
+    grade: nuke.Node | None = None
 
 
 # #----------------------------------------------------------------------------

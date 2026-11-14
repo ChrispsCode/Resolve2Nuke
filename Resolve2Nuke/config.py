@@ -104,6 +104,19 @@ TEMPLATE_RESOLVE_OUTPUT = "Blackmagic Design Film Gen 5"
 TEMPLATE_COLORSPACE = "BMDFilm WideGamut Gen5"
 
 # #----------------------------------------------------------------------------
+# # Grade LUT (a reference view of the clip's Resolve grade)
+
+# # TimelineItem.ExportLUT() exports the grade only: an ungraded clip gives an
+# # identity LUT, so no colour management is baked in. The grade works in the
+# # timeline's working space, DaVinci WG/Intermediate here. Verified 2026-11-14:
+# # hero BRAW -> DaVinci Intermediate -> LUT -> back matches Resolve's graded
+# # render to a median of 0.0006 (in BMD Film code values it's 0.02 off).
+GRADE_LUT_SPACE = "DaVinci Intermediate WideGamut"
+GRADE_LUT_SIZE = "EXPORT_LUT_65PTCUBE"   # # resolve.<constant>
+GRADE_LUT_DIR = "plates"                 # # under $SHOT_ROOT
+GRADE_LUT_NAME = "{shot}_grade_v{version:02d}.cube"
+
+# #----------------------------------------------------------------------------
 # # Send back
 
 # # Media pool bin for rendered comps. TCL is evaluated, "/" makes nested bins.

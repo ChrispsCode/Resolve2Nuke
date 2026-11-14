@@ -80,6 +80,11 @@ def render_template(shot: ShotInfo, fmt: str = config.DEFAULT_TEMPLATE_FORMAT, c
     project = resolve.GetProjectManager().GetCurrentProject()
     if not project:
         raise ResolveError("Resolve has no project open.")
+    # # Read the page before any render call: the render API switches Resolve to
+    # # the Deliver page (AddRenderJob does, and so did a call before it). Going
+    # # back matters: on Deliver, GetSelectedClips() reports Deliver's own current
+    # # clip, and the next pull would take it for the artist's selection.
+    saved_page = resolve.GetCurrentPage()
     original = project.GetCurrentTimeline()
     if not original or original.GetName() != shot.timeline_name:
         raise ResolveError(f"Open the timeline '{shot.timeline_name}' in Resolve to render its template plate.")
@@ -193,6 +198,8 @@ def render_template(shot: ShotInfo, fmt: str = config.DEFAULT_TEMPLATE_FORMAT, c
             project.SetCurrentTimeline(original)
             if duplicate:
                 project.GetMediaPool().DeleteTimelines([duplicate])
+            if saved_page and resolve.GetCurrentPage() != saved_page:
+                resolve.OpenPage(saved_page)
         else:
             logger.error(_STILL_RENDERING)
 

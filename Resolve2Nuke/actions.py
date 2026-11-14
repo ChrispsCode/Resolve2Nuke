@@ -8,8 +8,11 @@ the dialogs and the no-dialog entry points, so both behave the same.
 
 from __future__ import annotations
 
+import os
+
 import nuke
 
+from Resolve2Nuke import grade_lut
 from Resolve2Nuke import logger
 from Resolve2Nuke import resolve_bridge
 from Resolve2Nuke import send_back
@@ -38,9 +41,30 @@ def run_pull(shot: resolve_bridge.ShotInfo, options: shot_build.ShotOptions | No
         _message(msg)
     logger.info(f"Created {result.read.name()}" + (f" and {result.write.name()}" if result.write else ""))
 
+    if options is not None and options.include_grade:
+        result.grade = run_grade(shot, result.kronos or result.read)
     if options is not None and options.render_template:
         result.template = run_template(shot, options, beside=result.read)
     return result
+
+
+def run_grade(shot: resolve_bridge.ShotInfo, source: nuke.Node) -> nuke.Node | None:
+    """Export the clip's grade and add the ResolveGrade reference branch. Errors become a dialog."""
+    try:
+        path = grade_lut.lut_path()
+        if not resolve_bridge.export_grade_lut(shot, path):
+            # # Quiet: the option is on by default, and most plates aren't graded yet.
+            os.remove(path)
+            logger.info(f"{shot.clip_name} has no grade in Resolve, so no grade LUT was added")
+            return None
+        nuke.Undo.begin("Resolve grade LUT")
+        try:
+            return grade_lut.create_group(source, path)
+        finally:
+            nuke.Undo.end()
+    except (grade_lut.GradeError, resolve_bridge.ResolveError, OSError) as e:
+        report_error(e)
+        return None
 
 
 def run_template(shot: resolve_bridge.ShotInfo, options: shot_build.ShotOptions,

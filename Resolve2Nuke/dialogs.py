@@ -161,8 +161,8 @@ class PullDialog(_Dialog):
         self._shot: resolve_bridge.ShotInfo | None = None
         defaults = settings.load_shot_options()
 
-        self.clip_label, self.position_label, self.source_label, self.retime_label, self.colour_label, self.fps_label = (
-            _label() for _ in range(6))
+        (self.clip_label, self.position_label, self.source_label, self.retime_label, self.colour_label,
+         self.fps_label) = (_label() for _ in range(6))
         self.summary.addRow("Clip:", self.clip_label)
         self.summary.addRow("Timeline:", self.position_label)
         self.summary.addRow("Source:", self.source_label)
@@ -186,9 +186,12 @@ class PullDialog(_Dialog):
         self.handles.setValue(defaults.handles)
         self.create_write = QtWidgets.QCheckBox("Create Write")
         self.create_write.setToolTip(config.WRITE_FILE)
-        checkboxes = (self.set_ocio, self.set_fps, self.set_format, self.set_frame_range, self.create_write)
+        self.include_grade = QtWidgets.QCheckBox("Include grade (LUT)")
+        self.include_grade.setToolTip("Exports the clip's Resolve grade as a LUT and adds a ResolveGrade branch\n"
+                                      "off the plate, for reference. It isn't in the Write's pipe.")
+        checkboxes = (self.set_ocio, self.set_fps, self.set_format, self.set_frame_range, self.include_grade, self.create_write)
         for box_ in checkboxes:
-            box_.setChecked(True)  # # always ticked: the safe main-plate case
+            box_.setChecked(True)  # # always ticked: the safe main-plate case (grade: unticked when not hozed)
 
         grid.addWidget(self.set_ocio, 0, 0, 1, 2)
         grid.addWidget(self.set_fps, 1, 0)
@@ -196,7 +199,8 @@ class PullDialog(_Dialog):
         grid.addWidget(self.set_format, 2, 0, 1, 2)
         grid.addWidget(self.set_frame_range, 3, 0)
         grid.addWidget(self.handles, 3, 1)
-        grid.addWidget(self.create_write, 4, 0, 1, 2)
+        grid.addWidget(self.include_grade, 4, 0, 1, 2)
+        grid.addWidget(self.create_write, 5, 0, 1, 2)
         grid.setColumnStretch(2, 1)
         self.layout_.addWidget(box)
 
@@ -223,6 +227,7 @@ class PullDialog(_Dialog):
 
         self._buttons("Pull")
         self.render_template.toggled.connect(self._update_enabled)
+        self.include_grade.toggled.connect(self._update_enabled)
         self.template_format.activated.connect(self._update_enabled)
         self.template_clip_res.toggled.connect(self._update_enabled)
         self.action_button.clicked.connect(self._pull)
@@ -242,6 +247,7 @@ class PullDialog(_Dialog):
             set_frame_range=self.set_frame_range.isChecked(),
             handles=self.handles.value(),
             create_write=self.create_write.isChecked(),
+            include_grade=self.include_grade.isChecked() and self.include_grade.isEnabled(),
             render_template=self.render_template.isChecked() and self.render_template.isEnabled(),
             template_format=self.template_format.currentData(),
             template_clip_res=self.template_clip_res.isChecked(),
@@ -310,6 +316,14 @@ class PullDialog(_Dialog):
         fps_differ = bool(shot and abs(shot.clip_fps - shot.timeline_fps) >= 0.001)
         self.fps_source.setEnabled(self.set_fps.isChecked() and fps_differ)
         self.handles.setEnabled(self.set_frame_range.isChecked())
+        hozed = template_plate.hoz_context() is not None
+        self.include_grade.setEnabled(hozed)
+        if not hozed:
+            self.include_grade.setChecked(False)
+        self.include_grade.setToolTip(
+            "Exports the clip's Resolve grade as a LUT (Resolve flicks to the Color page and back)\n"
+            "and adds a ResolveGrade branch off the plate, for reference. It isn't in the Write's pipe."
+            if hozed else "Needs a hoz context, so the LUT lands in the right shot.")
         self._update_template()
         self.action_button.setEnabled(shot is not None)
         self._update_labels()

@@ -62,6 +62,7 @@ from Resolve2Nuke import config, dialogs, resolve_bridge, send_back, stamp  # no
 config.SETTINGS_ORG = "Resolve2NukeGuiPreview"
 QtCore.QSettings(config.SETTINGS_ORG, config.SETTINGS_APP).clear()
 
+os.environ.setdefault("SHOT_ROOT", "/shots/film/tree/sc010/sh010")
 BRAW = resolve_bridge.ShotInfo(
     file_path="/shots/plates/A001_08241708_C025.braw", clip_name="A001_08241708_C025.braw", is_sequence=False,
     width=4096, height=2160, clip_fps=24.0, resolve_colorspace="Blackmagic Design Film Gen 5",
@@ -106,6 +107,7 @@ def pull(name, shot=None, error=None, tweak=None, width=None):
 
 
 pull("pull_braw", BRAW)
+pull("pull_braw_grade_lut", BRAW, tweak=lambda d: d.include_grade.setChecked(True))
 pull("pull_ramp_handles", RAMP, tweak=lambda d: d.handles.setValue(8))
 pull("pull_canon_untagged", CANON)
 pull("pull_canon_tagged", CANON_TAGGED, tweak=lambda d: (d.set_ocio.setChecked(False), d.create_write.setChecked(False)))
