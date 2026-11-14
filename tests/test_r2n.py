@@ -4,10 +4,14 @@
 """
 import dataclasses
 import os
+import shutil
 import traceback
 
 SCRATCH = os.environ.get("R2N_TEST_DIR", "/tmp/r2n_test")
 os.environ["SHOT_ROOT"] = f"{SCRATCH}/shotroot"
+# # Start clean: leftover renders would make the "missing frames" send succeed and shift every placement.
+import shutil as _shutil
+_shutil.rmtree(os.environ["SHOT_ROOT"], ignore_errors=True)
 os.environ["SHOT_NAME"] = "test_tree_sc010_sh010"
 
 import nuke
@@ -287,6 +291,104 @@ try:
     check("tag: Canon tagged Canon is fine", dataclasses.replace(canon, resolve_colorspace="Canon Cinema Gamut/Canon Log 3").colour_tag_warning() is None)
     check("tag: BRAW tagged BMD is fine", shot.colour_tag_warning() is None)
     check("tag: BRAW tagged Canon warns", dataclasses.replace(shot, resolve_colorspace="Canon Cinema Gamut/Canon Log 3").colour_tag_warning())
+
+    # #================ TEMPLATE PLATES
+    from Resolve2Nuke import template_plate, template_render
+    plates_dir = os.path.join(os.environ["SHOT_ROOT"], "plates")
+    shutil.rmtree(plates_dir, ignore_errors=True)
+    t1 = template_plate.target("exr")
+    check("template: first is v01, EXR path", t1.version == 1 and t1.path.endswith("test_tree_sc010_sh010_plate_v01/test_tree_sc010_sh010_plate_v01.%04d.exr"), t1.path)
+
+    def resolve_state():
+        presets = [p for p in project.GetRenderPresetList() if p.startswith("R2N_restore_")]
+        temps = [project.GetTimelineByIndex(i).GetName() for i in range(1, project.GetTimelineCount() + 1)
+                 if project.GetTimelineByIndex(i).GetName().startswith("R2N template ")]
+        staging = [f for f in os.listdir(config.TEMPLATE_STAGING_DIR)] if os.path.isdir(config.TEMPLATE_STAGING_DIR) else []
+        return (project.GetSetting("colorSpaceOutput"), project.GetCurrentRenderMode(), project.GetCurrentTimeline().GetName(),
+                project.GetRenderJobList(), presets, temps, staging, project.IsRenderingInProgress(),
+                project.GetSetting("timelineResolutionWidth"), project.GetSetting("timelineResolutionHeight"))
+
+    before = resolve_state()
+    nuke.scriptClear()
+    messages.clear()
+    res = actions.run_pull(shot, shot_build.ShotOptions(render_template=True, template_format="exr"))
+    tr = res.template
+    check("template exr: Read made, no error dialog", tr is not None and not messages, messages)
+    check("template exr: Resolve restored", resolve_state() == before, (before, resolve_state()))
+    check("template exr: v01 files 107-145", tr is not None and len(os.listdir(os.path.dirname(t1.path))) == 39
+          and (tr["first"].value(), tr["last"].value(), tr.format().width()) == (107, 145, 4096))
+    if tr is not None:
+        tr["raw"].setValue(True)
+        hero = res.read
+        hero["raw"].setValue(True)
+        pts = [(x * 400 + .5, y * 300 + .5) for x in range(1, 10) for y in range(1, 7)]
+        for f in (107, 145):
+            d = sorted(abs(hero.sample(c, x, y, frame=f) - tr.sample(c, x, y, frame=f)) for x, y in pts for c in ("rgba.red", "rgba.green"))
+            check(f"template exr: matches hero BRAW at {f}", d[len(d) // 2] < 0.002 and d[-1] < 0.01, (round(d[len(d) // 2], 5), round(d[-1], 5)))
+        check("template exr: stamped, BMD Film", stamp.read_stamp(tr).item_id == shot.item_id and tr["colorspace"].value() == config.TEMPLATE_COLORSPACE)
+    check("template: next is v02", template_plate.target("prores").version == 2)
+
+    # # ProRes of the 50% clip at the clip's resolution: must line up with the Kronos
+    nuke.scriptClear()
+    messages.clear()
+    res = actions.run_pull(slow, shot_build.ShotOptions(render_template=True, template_format="prores"))
+    tr = res.template
+    check("template prores: v02 .mov, starts at 107", tr is not None and tr["file"].value().endswith("_plate_v02.mov")
+          and tr["frame_mode"].value() == "start at" and tr["frame"].value() == "107", messages)
+    check("template prores: Resolve restored", resolve_state() == before, (before, resolve_state()))
+    if tr is not None:
+        pts = [(x * 400 + .5, y * 300 + .5) for x in range(1, 10) for y in range(1, 7)]
+        for f in (107, 109, 140):
+            d = sorted(abs(res.kronos.sample("rgba.green", x, y, frame=f) - tr.sample("rgba.green", x, y, frame=f)) for x, y in pts)
+            check(f"template prores: matches Kronos at {f}", d[len(d) // 2] < 0.003, round(d[len(d) // 2], 5))
+
+    # # Cancel during a real render: Resolve must stop and be fully restored (it hung once)
+    calls = []
+
+    def cancel_after_two():
+        calls.append(1)
+        return len(calls) > 2
+    try:
+        template_render.render_template(slow, "exr", True, cancelled=cancel_after_two)
+        check("template cancel: raises", False)
+    except resolve_bridge.ResolveError as e:
+        check("template cancel: raises 'cancelled'", "cancelled" in str(e), str(e))
+    check("template cancel: Resolve restored and idle", resolve_state() == before, (before, resolve_state()))
+
+    # # Canon on Timeline 1 (read-only, via a temporary copy): clip res must stay colour managed.
+    # # Custom timeline settings once turned colour management off and the plate came out as raw Canon Log 3.
+    tl1 = next((project.GetTimelineByIndex(i) for i in range(1, project.GetTimelineCount() + 1)
+                if project.GetTimelineByIndex(i).GetName() == "Timeline 1"), None)
+    canon_item = next((i for i in (tl1.GetItemListInTrack("video", 1) if tl1 else []) or [] if i.GetName() == "IMG_5774.MP4"), None)
+    if canon_item is None or canon_item.GetMediaPoolItem().GetClipProperty("Input Color Space") != "Canon Cinema Gamut/Canon Log 3":
+        print("SKIP  canon template: IMG_5774.MP4 not on Timeline 1, or not tagged Canon Log 3")
+    else:
+        project.SetCurrentTimeline(tl1)
+        canon_shot = resolve_bridge._shot_from_item(resolve, project, tl1, canon_item)
+        before_tl1 = resolve_state()
+        full = template_render.render_template(canon_shot, "exr", True)
+        small = template_render.render_template(canon_shot, "exr", False)
+        check("canon template: Resolve restored", resolve_state()[:6] == before_tl1[:6] and resolve_state()[7:] == before_tl1[7:],
+              (before_tl1, resolve_state()))
+        rf = nuke.nodes.Read(file=os.path.join(full.folder, os.path.basename(full.files[0])))
+        rs = nuke.nodes.Read(file=os.path.join(small.folder, os.path.basename(small.files[0])))
+        rf["raw"].setValue(True); rs["raw"].setValue(True)
+        scaled = nuke.nodes.Reformat(inputs=[rf], type="to box", box_width=rs.format().width(), box_height=rs.format().height(), resize="distort")
+        check("canon template: clip res is 3840x2160", (rf.format().width(), rf.format().height()) == (3840, 2160))
+        pts = [(x * 190 + .5, y * 150 + .5) for x in range(1, 10) for y in range(1, 7)]
+        d = sorted(abs(scaled.sample(c, x, y) - rs.sample(c, x, y)) for x, y in pts for c in ("rgba.red", "rgba.green"))
+        check("canon template: clip res is colour managed (matches timeline res)", d[len(d) // 2] < 0.01, round(d[len(d) // 2], 5))
+        shutil.rmtree(full.folder, ignore_errors=True)
+        shutil.rmtree(small.folder, ignore_errors=True)
+        project.SetCurrentTimeline(timeline)
+
+    # # Not hozed: a clear error, no render
+    saved_root = os.environ.pop("SHOT_ROOT")
+    messages.clear()
+    out = actions.run_template(shot, shot_build.ShotOptions(render_template=True))
+    check("template not hozed: error dialog, no Read", out is None and messages and "hoz" in messages[0], messages)
+    os.environ["SHOT_ROOT"] = saved_root
+    shutil.rmtree(plates_dir, ignore_errors=True)
 
     # #================ BIN EVALUATION
     check("bin: hozed", send_back.evaluate_bin("VFX/[getenv SHOT_NAME]") == ("VFX/test_tree_sc010_sh010", None))

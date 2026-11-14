@@ -14,6 +14,8 @@ from Resolve2Nuke import logger
 from Resolve2Nuke import resolve_bridge
 from Resolve2Nuke import send_back
 from Resolve2Nuke import shot_build
+from Resolve2Nuke import template_plate
+from Resolve2Nuke import template_render
 
 
 def _message(text: str) -> None:
@@ -35,7 +37,46 @@ def run_pull(shot: resolve_bridge.ShotInfo, options: shot_build.ShotOptions | No
         logger.warning(msg.replace("\n\n", " "))
         _message(msg)
     logger.info(f"Created {result.read.name()}" + (f" and {result.write.name()}" if result.write else ""))
+
+    if options is not None and options.render_template:
+        result.template = run_template(shot, options, beside=result.read)
     return result
+
+
+def run_template(shot: resolve_bridge.ShotInfo, options: shot_build.ShotOptions,
+                 beside: nuke.Node | None = None) -> nuke.Node | None:
+    """Render the template plate in Resolve, move it into the shot and Read it.
+    Its own undo step, after the pull's. Errors become a dialog and return None."""
+    task = None
+    try:
+        plate = template_plate.target(options.template_format)
+        try:
+            task = nuke.ProgressTask("Resolve2Nuke: template plate")
+        except Exception:
+            task = None
+
+        def progress(pct: int, msg: str) -> None:
+            if task is not None:
+                task.setProgress(pct)
+                task.setMessage(msg)
+
+        def cancelled() -> bool:
+            return bool(task is not None and task.isCancelled())
+
+        rendered = template_render.render_template(shot, options.template_format, options.template_clip_res,
+                                                   progress=progress, cancelled=cancelled)
+        template_plate.move_into_shot(rendered, plate)
+        nuke.Undo.begin("Template plate from Resolve")
+        try:
+            return template_plate.create_read(plate, shot, beside)
+        finally:
+            nuke.Undo.end()
+    except (template_plate.TemplateError, resolve_bridge.ResolveError, OSError) as e:
+        report_error(e)
+        return None
+    finally:
+        # # The progress bar only closes when the task is destroyed.
+        del task
 
 
 def run_send(options: send_back.SendOptions | None = None, write: nuke.Node | None = None,

@@ -71,6 +71,28 @@ In the GUI, both menu commands open a non-modal dialog (`dialogs.py`). With `opt
   - the fps line now *checks* frame-for-frame playback, using (source end − source start time) × clip fps against the duration, instead of always warning.
 - **`tests/gui_preview.py`** renders both dialogs offscreen to PNGs (using Nuke's bundled Python, a stubbed `nuke` and fake data). It caught clipped warnings and a squeezed form label, now fixed with word-wrapped labels and middle-elided paths.
 
+### 5. Template plates (v0.5.0)
+
+A **Template plate** option in the pull dialog (off by default, only when hozed) has Resolve render the clip **as it plays in the edit** (grade, sizing, retime). It's used as a reference, or as the hero plate when Nuke can't read the camera file (Canon R6 HEVC 4:2:2). The hero Read is always created anyway, even if Nuke can't read it, ready for a separate conversion tool.
+
+- **Resolve side (`template_render.py`, no nuke import):**
+  1. Duplicate the current timeline and delete everything in the copy except the clip, matched by track and record start because the copy's IDs are new.
+  2. Optionally render at the clip's resolution, by changing the **project's** timeline resolution, which the copy inherits. Custom settings on the copy would turn its colour management off; see the quirks below.
+  3. Save the Deliver settings as a temporary preset, then switch the **project's** output colour space to BMD Film Gen 5 (a timeline can't hold its own: `SetSetting("colorSpaceOutput")` on a timeline returns False).
+  4. Render the record range in single-clip mode, with `ClipStartFrame = source_first` so EXR frames carry the comp's frame numbers, into a staging folder under `~/DaVinci Resolve Media/Resolve2Nuke/` (Media Storage). Progress and Cancel go through `nuke.ProgressTask` / `StopRendering()`.
+  5. Everything is restored in a `finally`, once Resolve has really stopped rendering: output colour space, resolution, render mode, Deliver preset, job, the copy, and the current timeline. A failed or cancelled render deletes its staging folder.
+- **Nuke side (`template_plate.py`):**
+  - The next version counts across both formats: `$SHOT_ROOT/plates/<SHOT_NAME>_plate_v##/<SHOT_NAME>_plate_v##.%04d.exr` or `$SHOT_ROOT/plates/<SHOT_NAME>_plate_v##.mov`.
+  - It moves the render out of staging, renaming Resolve's 8-digit frames to `%04d`, and never overwrites an existing version.
+  - It creates a stamped Read (BMDFilm WideGamut Gen5) next to the hero Read. A movie Read uses `frame_mode` "start at" `source_first`, because movies always read as frames 1–N.
+  - It's its own undo step, after the pull's.
+- **Formats:** EXR (half, ZIP, lossless; 1.1 GB for 39 frames of 4K) or ProRes 4444 XQ (12-bit; 0.33 GB). Both are encoded as BMD Film Gen5 / WG Gen5.
+- **Verified 2026-11-14:**
+  - An EXR template of an ungraded BRAW matches Nuke's own BRAW decode (median 0.0006, max 0.0024).
+  - ProRes 4444 XQ matches too (12-bit rounding, max about 0.005).
+  - A ProRes template of a 50% clip matches the Kronos frame for frame (median 0.0002), so Resolve's Nearest retime and our keys agree.
+  - The 0.856× remap seen with DaVinci Intermediate output doesn't happen with BMD Film output.
+
 ## Decisions and why
 
 - **Nuke 17.1+ only.** 17.1's BRAW reader uses SDK 5.1 (15.2's uses 2.2, Resolve 21 uses 5.x). `DaVinciResolveScript` imports in-process in 17.1, while in 15.2 Resolve's `fusionscript.so` fails on a libc++ symbol clash. `menu.py` prints a red warning in 15.
@@ -110,6 +132,11 @@ In the GUI, both menu commands open a non-modal dialog (`dialogs.py`). With `opt
   - `<timeMap>` points pair the clip's local time with source time, in the source's own seconds (the asset's `start` = the source's start timecode).
 - **Input colour space** is the clip property `Input Color Space`. Tagging in the Color page (right-click the thumbnail) sets it, and `SetClipProperty` can set it too.
 - **The mapped Media Storage** (2026-11-14): `~/Videos`, `~/DaVinci Resolve Media`, `~/Documents/DevTest`.
+- **Never switch a timeline to custom settings for a render** (`SetSetting("useCustomSettings", "1")`). It changes that timeline's colour science from `davinciYRGBColorManagedv2` to plain `davinciYRGB`, i.e. unmanaged, and the render passes the decode straight through. A BRAW still looks right (its decode *is* BMD Film), which hid the bug. A Canon came out as raw Canon Log 3, read as BMD Film: "crunchy and contrasty" (Harry, 2026-11-14). Colour science and the timeline colour space can be set back on a custom timeline, but its output and input colour spaces can't (`SetSetting` returns False). Template plates at the clip's resolution therefore change the *project's* timeline resolution and restore it, and refuse to render from a timeline that isn't colour managed.
+- **`StopRendering()` is asynchronous.** Wait until `IsRenderingInProgress()` is False before touching the job or the timeline. Deleting the timeline being rendered left Resolve hung, and it needed a force quit (2026-11-14). The template cleanup now waits up to 30 s, and if Resolve still hasn't stopped, it leaves the job and the copy in place and says so.
+- **`Timeline.DuplicateTimeline()` makes the copy the current timeline.** Rendering needs it current anyway.
+- **`ClipStartFrame`** in `SetRenderSettings` sets an image sequence's first frame number (8-digit padding). Movies ignore it, and carry the record timecode instead.
+- **The render state to restore:** `GetSetting("colorSpaceOutput")`, `GetCurrentRenderMode()`, and the Deliver settings via `SaveAsNewRenderPreset` / `LoadRenderPreset` / `DeleteRenderPreset`.
 - **Resolve on Linux can encode ProRes** (422 to 4444 XQ) and DNxHR 444. Nuke 17.1 on Linux can't decode HEVC 4:2:2 10-bit (Canon R6).
 - Unique IDs survive a Resolve restart.
 - The MCP `run_script` has a 10 s limit. Start renders in one call and poll in another, and restore settings in the polling call.
@@ -118,12 +145,8 @@ In the GUI, both menu commands open a non-modal dialog (`dialogs.py`). With `opt
 
 - [ ] GUI for pull (`ShotOptions` as checkboxes, with fps source greyed out when the clip and timeline match, plus a confirmation) and for send (placement mode, plus a bin line edit defaulting to `VFX/[SHOT_NAME]` so many shots and versions stay tidy; nested bins need creating level by level).
 - [x] Retimes: Kronos (Frame) from Resolve's curve (v0.4.0).
-- [ ] **Template plate** (pass 2):
-  - an option in the pull, off by default, hozed only;
-  - Resolve renders the clip with its effects into a staging folder in `~/DaVinci Resolve Media/Resolve2Nuke/`, then the pull moves it to `plates/<SHOT>_plate_v##[/...].exr|.mov`;
-  - EXR (half, ZIP) or ProRes 4444 XQ, encoded as BMD Film Gen5 / WG Gen5;
-  - an optional switch to the clip's resolution;
-  - the cut range only.
+- [x] Template plates (v0.5.0).
+- [ ] A separate tool (another repo) to convert camera files Nuke can't read, for full-range hero plates.
 - [ ] Versioned Write paths (the `v01` is hard-coded). Harry plans a better path setter.
 - [ ] More pixel-tested colour mappings. Canon may not need one: template plates come out as BMD Film.
 - [ ] Drop-frame timelines for playhead pick and placement.

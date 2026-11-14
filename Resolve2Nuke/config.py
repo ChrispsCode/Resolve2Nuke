@@ -76,6 +76,34 @@ WRITE_RESOLVE_COLORSPACE = "Blackmagic Design Film Gen 5"
 WRITE_DATATYPE = "16 bit half"
 
 # #----------------------------------------------------------------------------
+# # Template plate (Resolve renders the clip with its grade, sizing and retime)
+
+# # Resolve only renders into its Media Storage locations, so it renders here
+# # and the pull moves the result into the shot. Must be inside a mapped
+# # Media Storage folder (Resolve Preferences > System > Media Storage).
+TEMPLATE_STAGING_DIR = os.path.expanduser("~/DaVinci Resolve Media/Resolve2Nuke")
+
+# # Destinations, under $SHOT_ROOT. {name} is "<SHOT_NAME>_plate_v##".
+TEMPLATE_DIR = "plates"
+TEMPLATE_SEQUENCE = "{name}/{name}.%04d.exr"
+TEMPLATE_MOVIE = "{name}.mov"
+TEMPLATE_NAME = "{shot}_plate_v{version:02d}"
+
+# # key -> (label, Resolve format, Resolve codec, is a movie)
+TEMPLATE_FORMATS = {
+    "exr": ("EXR (half, ZIP: lossless)", "exr", "RGBHalfZIP", False),
+    "prores": ("ProRes 4444 XQ (12-bit, about 1/3 the size)", "mov", "ProRes4444XQ", True),
+}
+DEFAULT_TEMPLATE_FORMAT = "exr"
+
+# # Rendered in the same encoding as the Writes, so a template plate reads like
+# # the hero BRAW. Verified 2026-11-14: Resolve's BMD Film Gen 5 plate of an
+# # ungraded BRAW matches Nuke's own BRAW decode to a median of 0.0006 (EXR
+# # and ProRes 4444 XQ). Set on the project for the render, then restored.
+TEMPLATE_RESOLVE_OUTPUT = "Blackmagic Design Film Gen 5"
+TEMPLATE_COLORSPACE = "BMDFilm WideGamut Gen5"
+
+# #----------------------------------------------------------------------------
 # # Send back
 
 # # Media pool bin for rendered comps. TCL is evaluated, "/" makes nested bins.

@@ -4,7 +4,8 @@ Resolve2Nuke.settings
 
 Per-user memory of the dialogs' last-used values (QSettings), switched by
 config.REMEMBER_SETTINGS. Only the "how" values are remembered (fps source,
-handles, placement, bin). The root-setting checkboxes always start ticked.
+handles, template format and resolution, placement, bin). The checkboxes
+always start at their defaults: root settings ticked, template plate off.
 
 Bad or missing stored values fall back to the defaults.
 """
@@ -35,6 +36,10 @@ def load_shot_options() -> ShotOptions:
         if fps_source in FPS_SOURCES:
             options.fps_source = fps_source
         options.handles = max(0, int(s.value("pull/handles", options.handles)))
+        fmt = s.value("pull/template_format", options.template_format)
+        if fmt in config.TEMPLATE_FORMATS:
+            options.template_format = fmt
+        options.template_clip_res = str(s.value("pull/template_clip_res", options.template_clip_res)).lower() in ("true", "1")
     except Exception as e:
         logger.warning(f"Couldn't read remembered pull settings, using defaults ({e})")
     return options
@@ -46,6 +51,8 @@ def save_shot_options(options: ShotOptions) -> None:
     s = _store()
     s.setValue("pull/fps_source", options.fps_source)
     s.setValue("pull/handles", int(options.handles))
+    s.setValue("pull/template_format", options.template_format)
+    s.setValue("pull/template_clip_res", bool(options.template_clip_res))
 
 
 def load_send_options() -> SendOptions:

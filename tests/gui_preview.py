@@ -78,9 +78,11 @@ CANON = dataclasses.replace(
 CANON_TAGGED = dataclasses.replace(CANON, resolve_colorspace="Canon Cinema Gamut/Canon Log 3", colorspace_from_project=False)
 
 
-def grab(widget, name):
+def grab(widget, name, width=None):
     # # No adjustSize() here: the dialogs must size themselves, as they do in Nuke.
     widget.show()
+    if width:
+        widget.resize(width, widget.height())  # # as if the artist widened the window
     for _ in range(3):
         app.processEvents()
     path = os.path.join(OUT, f"{name}.png")
@@ -91,7 +93,7 @@ def grab(widget, name):
 
 
 # #---- pull dialog states
-def pull(name, shot=None, error=None, tweak=None):
+def pull(name, shot=None, error=None, tweak=None, width=None):
     def get_shot(resolve=None):
         if error:
             raise resolve_bridge.ResolveError(error)
@@ -100,7 +102,7 @@ def pull(name, shot=None, error=None, tweak=None):
         d = dialogs.PullDialog()
         if tweak:
             tweak(d)
-        grab(d, name)
+        grab(d, name, width)
 
 
 pull("pull_braw", BRAW)
@@ -115,6 +117,23 @@ def refresh_to(shot_):
 
 
 pull("pull_refresh_braw_to_canon", BRAW, tweak=refresh_to(CANON))
+# # Template plate states: not hozed, then hozed with a v01 already there (so v02 is next)
+os.environ.pop("SHOT_ROOT", None)
+pull("pull_template_not_hozed", BRAW)
+import tempfile  # noqa: E402
+shot_root = tempfile.mkdtemp(prefix="r2n_gui_")
+os.makedirs(os.path.join(shot_root, "plates", f"{os.environ['SHOT_NAME']}_plate_v01"))
+os.environ["SHOT_ROOT"] = shot_root
+pull("pull_template_exr", BRAW, tweak=lambda d: d.render_template.setChecked(True))
+pull("pull_template_prores_timeline_res", RAMP, tweak=lambda d: (
+    d.render_template.setChecked(True), d.template_format.setCurrentIndex(d.template_format.findData("prores")),
+    d.template_clip_res.setChecked(False), d._update_enabled()))
+long_root = os.path.join(tempfile.mkdtemp(prefix="r2n_gui_"), "home/harry/Documents/DevTest/DevTest/dev/VFX_RoundTrip_retimeTst")
+os.makedirs(long_root)
+os.environ["SHOT_ROOT"] = long_root
+pull("pull_template_long_path", BRAW, tweak=lambda d: d.render_template.setChecked(True))
+pull("pull_template_long_path_widened", BRAW, tweak=lambda d: d.render_template.setChecked(True), width=1100)
+os.environ["SHOT_ROOT"] = shot_root
 pull("pull_error", error="No clip selected, and no clip with source media under the playhead (01:00:05:00) on an enabled video track.")
 
 # #---- send dialog states

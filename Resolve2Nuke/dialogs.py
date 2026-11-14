@@ -22,6 +22,7 @@ from Resolve2Nuke import resolve_bridge
 from Resolve2Nuke import send_back
 from Resolve2Nuke import settings
 from Resolve2Nuke import shot_build
+from Resolve2Nuke import template_plate
 from Resolve2Nuke.qt import QtCore, QtGui, QtWidgets
 
 GREEN = "#7cc47c"
@@ -96,9 +97,14 @@ def _label() -> QtWidgets.QLabel:
     return label
 
 
-def _elide_path(path: str, label: QtWidgets.QLabel, width: int = 400) -> str:
-    """Shorten a long path in the middle to fit, keeping the file name readable."""
-    return label.fontMetrics().elidedText(path, QtCore.Qt.ElideMiddle, width)
+def _path_label() -> QtWidgets.QLabel:
+    """A label for a full path that never widens the window: the text runs off
+    the right edge and shows in full when the window is made wider."""
+    label = _label()
+    policy = label.sizePolicy()
+    policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Ignored)
+    label.setSizePolicy(policy)
+    return label
 
 
 class _Dialog(QtWidgets.QDialog):
@@ -194,7 +200,31 @@ class PullDialog(_Dialog):
         grid.setColumnStretch(2, 1)
         self.layout_.addWidget(box)
 
+        # # Template plate: Resolve renders the clip with its effects (off by default, hozed only).
+        tbox = QtWidgets.QGroupBox("Template plate")
+        tgrid = QtWidgets.QGridLayout(tbox)
+        self.render_template = QtWidgets.QCheckBox("Render a template plate from Resolve")
+        self.render_template.setToolTip("Resolve renders the clip as it plays in the edit (grade, sizing, retime),\n"
+                                        "encoded as BMD Film Gen 5, into the shot's plates folder.")
+        self.template_format = QtWidgets.QComboBox()
+        for key, (label, *_rest) in config.TEMPLATE_FORMATS.items():
+            self.template_format.addItem(label, key)
+        self.template_format.setCurrentIndex(max(0, self.template_format.findData(defaults.template_format)))
+        self.template_clip_res = QtWidgets.QCheckBox("At the clip's resolution (otherwise the timeline's)")
+        self.template_clip_res.setChecked(defaults.template_clip_res)
+        self.template_label = _path_label()
+        tgrid.addWidget(self.render_template, 0, 0, 1, 2)
+        tgrid.addWidget(QtWidgets.QLabel("Format"), 1, 0)
+        tgrid.addWidget(self.template_format, 1, 1)
+        tgrid.addWidget(self.template_clip_res, 2, 0, 1, 2)
+        tgrid.addWidget(self.template_label, 3, 0, 1, 2)
+        tgrid.setColumnStretch(1, 1)
+        self.layout_.addWidget(tbox)
+
         self._buttons("Pull")
+        self.render_template.toggled.connect(self._update_enabled)
+        self.template_format.activated.connect(self._update_enabled)
+        self.template_clip_res.toggled.connect(self._update_enabled)
         self.action_button.clicked.connect(self._pull)
         # # Connected after the buttons exist: _update_enabled touches action_button.
         for box_ in checkboxes:
@@ -212,6 +242,9 @@ class PullDialog(_Dialog):
             set_frame_range=self.set_frame_range.isChecked(),
             handles=self.handles.value(),
             create_write=self.create_write.isChecked(),
+            render_template=self.render_template.isChecked() and self.render_template.isEnabled(),
+            template_format=self.template_format.currentData(),
+            template_clip_res=self.template_clip_res.isChecked(),
         )
 
     def refresh(self) -> None:
@@ -277,8 +310,31 @@ class PullDialog(_Dialog):
         fps_differ = bool(shot and abs(shot.clip_fps - shot.timeline_fps) >= 0.001)
         self.fps_source.setEnabled(self.set_fps.isChecked() and fps_differ)
         self.handles.setEnabled(self.set_frame_range.isChecked())
+        self._update_template()
         self.action_button.setEnabled(shot is not None)
         self._update_labels()
+
+    def _update_template(self) -> None:
+        """Hozed only; shows the exact path the plate will get."""
+        try:
+            plate = template_plate.target(self.template_format.currentData())
+        except template_plate.TemplateError as e:
+            self.render_template.setEnabled(False)
+            self.render_template.setChecked(False)
+            self.template_label.setText(_html(str(e), GREY, wrap=True))
+        else:
+            self.render_template.setEnabled(True)
+            on = self.render_template.isChecked()
+            text = _html(f"→ {plate.path}", None if on else GREY)
+            if on and self._shot is not None:
+                size = f"{self._shot.width}x{self._shot.height}" if self.template_clip_res.isChecked() else "timeline resolution"
+                text += "<br>" + _html(f"{self._shot.source_first}-{self._shot.source_last}, {size}, BMD Film Gen 5. "
+                                       f"The cut only, no handles.", GREY, wrap=True)
+            self.template_label.setText(text)
+            self.template_label.setToolTip(plate.path)
+        on = self.render_template.isChecked()
+        self.template_format.setEnabled(on)
+        self.template_clip_res.setEnabled(on)
 
     def _pull(self) -> None:
         shot, options = self._shot, self.options()
@@ -303,7 +359,7 @@ class SendDialog(_Dialog):
         self._plan: resolve_bridge.PlacementPlan | None = None
         defaults = settings.load_send_options()
 
-        self.write_label, self.frames_label, self.source_label = (_label() for _ in range(3))
+        self.write_label, self.frames_label, self.source_label = _path_label(), _label(), _label()
         self.summary.addRow("Write:", self.write_label)
         self.summary.addRow("Frames:", self.frames_label)
         self.summary.addRow("From:", self.source_label)
@@ -352,7 +408,7 @@ class SendDialog(_Dialog):
     def _update_summary(self) -> None:
         info = self._info
         path = nuke.filename(info.write)
-        self.write_label.setText(_html(info.write.name(), bold=True) + "<br>" + _html(_elide_path(path, self.write_label), GREY))
+        self.write_label.setText(_html(info.write.name(), bold=True) + "<br>" + _html(path, GREY))
         self.write_label.setToolTip(path)
         rng = f"{info.first}-{info.last} ({info.frame_count} frames)"
         if info.missing:
