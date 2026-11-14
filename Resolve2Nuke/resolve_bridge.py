@@ -13,12 +13,14 @@ extensions are simple arithmetic.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
 from dataclasses import dataclass
 
 from Resolve2Nuke import config
+from Resolve2Nuke import fcpxml
 from Resolve2Nuke import logger
 
 
@@ -40,8 +42,11 @@ class ShotInfo:
     height: int
     clip_fps: float
     resolve_colorspace: str  # Resolve's input colour space for the clip (resolved from "Project")
+    colorspace_from_project: bool  # the clip isn't tagged, it uses the project's input colour space
+    codec: str               # Resolve's "Video Codec", e.g. "Blackmagic RAW"
 
-    # # The cut, in Nuke frame numbers of the source file
+    # # The cut. Not retimed: Nuke frame numbers of the source file.
+    # # Retimed: output frames, numbered from the cut's first source frame.
     source_first: int
     source_last: int
 
@@ -55,9 +60,40 @@ class ShotInfo:
     record_in_tc: str
     item_id: str
 
+    # # Retime (None when the clip plays at 100%)
+    speed: float = 100.0                       # Resolve's reported speed (an average for ramps)
+    retime_frames: list[float] | None = None   # Nuke source frame for each output frame
+    retime_nearest: bool = True                # Resolve picks whole frames (Nearest), else blends
+    frame_for_frame: bool = True               # each timeline frame is one source frame (fps mismatches included)
+
     @property
     def duration(self) -> int:
         return self.source_last - self.source_first + 1
+
+    @property
+    def retimed(self) -> bool:
+        return self.retime_frames is not None
+
+    @property
+    def is_ramp(self) -> bool:
+        if not self.retimed or len(self.retime_frames) < 3:
+            return False
+        steps = [b - a for a, b in zip(self.retime_frames, self.retime_frames[1:])]
+        return max(steps) - min(steps) > 0.01
+
+    def colour_tag_warning(self) -> str | None:
+        """A hint that the clip's Resolve input colour space may be wrong.
+
+        A Blackmagic tag on a non-BRAW file is fine: sent comps are tagged BMD
+        Film Gen 5 on purpose, and Blackmagic cameras record ProRes in it too."""
+        is_braw = "blackmagic raw" in self.codec.lower() or self.file_path.lower().endswith(".braw")
+        bmd_space = self.resolve_colorspace.startswith("Blackmagic Design")
+        if self.colorspace_from_project and not is_braw:
+            return (f"Not tagged in Resolve, so it uses the project's '{self.resolve_colorspace}'. "
+                    f"Check its Input Color Space (Color page, right-click the thumbnail).")
+        if is_braw and not bmd_space:
+            return f"A BRAW tagged '{self.resolve_colorspace}'. Check its Input Color Space."
+        return None
 
 
 # #----------------------------------------------------------------------------
@@ -163,16 +199,61 @@ def item_source_first(item) -> int:
     return nuke_first_of_clip + item.GetLeftOffset()
 
 
-def _shot_from_item(project, timeline, item) -> ShotInfo:
+def _retime_nearest(project, item) -> bool:
+    """Whether Resolve shows whole source frames (Nearest) rather than blending."""
+    process = int(item.GetProperty("RetimeProcess") or 0)
+    if process == 0:  # # use project
+        return str(project.GetSetting("imageRetimeInterpolation")).lower() == "nearest"
+    return process == 1
+
+
+def _retime(resolve, project, timeline, item, nuke_first_of_clip: int, clip_fps: float):
+    """(Nuke source frame per output frame, nearest) for a retimed item, or (None, True)."""
+    speed = float((item.GetSpeed() or {}).get("Percentage", 100.0))
+    try:
+        curve = fcpxml.retime_curve(timeline, resolve, item.GetStart(), item.GetTrackTypeAndIndex()[1])
+    except Exception as e:
+        if abs(speed - 100.0) > 0.001:
+            raise ResolveError(f"The clip is retimed ({speed:g}%) but its retime curve couldn't be read ({e}).") from e
+        logger.warning(f"Couldn't check the clip for a retime ({e}), assuming it isn't retimed")
+        return None, True
+    if curve is None:
+        return None, True
+    fps = float(timeline.GetSetting("timelineFrameRate"))
+    frames = [nuke_first_of_clip + f for f in curve.source_frames(item.GetDuration(), fps, clip_fps)]
+    return frames, _retime_nearest(project, item)
+
+
+def _covers_one_frame_each(item, clip_fps: float) -> bool:
+    """Whether the item shows one source frame per timeline frame. Resolve plays a
+    23.976 clip on a 24 timeline frame-for-frame (verified 2026-11-14); this checks
+    rather than assumes, using the source time the item covers."""
+    try:
+        covered = (item.GetSourceEndTime() - item.GetSourceStartTime()) * clip_fps
+    except Exception:
+        return True
+    return abs(covered - item.GetDuration()) < 0.6
+
+
+def _shot_from_item(resolve, project, timeline, item) -> ShotInfo:
     mpi = item.GetMediaPoolItem()
     props = mpi.GetClipProperty()
     file_path, is_sequence = _nuke_path(props["File Path"])
+    clip_fps = float(props.get("FPS") or 0)
 
-    source_first = item_source_first(item)
+    clip_start = int(props.get("Start") or 0)
+    nuke_first_of_clip = clip_start if is_sequence else clip_start + 1
+    retime_frames, nearest = _retime(resolve, project, timeline, item, nuke_first_of_clip, clip_fps)
+    if retime_frames is None:
+        source_first = item_source_first(item)
+    else:
+        # # Output frames are numbered from the cut's first source frame.
+        source_first = int(math.floor(retime_frames[0] + 1e-6))
     source_last = source_first + item.GetDuration() - 1
 
     colorspace = props.get("Input Color Space") or "Project"
-    if colorspace.startswith("Project"):
+    from_project = colorspace.startswith("Project")
+    if from_project:
         colorspace = project.GetSetting("colorSpaceInput")
 
     width, height = (int(v) for v in props["Resolution"].lower().split("x"))
@@ -185,8 +266,10 @@ def _shot_from_item(project, timeline, item) -> ShotInfo:
         is_sequence=is_sequence,
         width=width,
         height=height,
-        clip_fps=float(props.get("FPS") or 0),
+        clip_fps=clip_fps,
         resolve_colorspace=colorspace,
+        colorspace_from_project=from_project,
+        codec=props.get("Video Codec") or "",
         source_first=source_first,
         source_last=source_last,
         project_name=project.GetName(),
@@ -197,6 +280,10 @@ def _shot_from_item(project, timeline, item) -> ShotInfo:
         record_out=item.GetEnd() - 1,
         record_in_tc=_frame_to_timecode(record_in, float(timeline.GetSetting("timelineFrameRate"))),
         item_id=item.GetUniqueId(),
+        speed=float((item.GetSpeed() or {}).get("Percentage", 100.0)),
+        retime_frames=retime_frames,
+        retime_nearest=nearest,
+        frame_for_frame=retime_frames is None and _covers_one_frame_each(item, clip_fps),
     )
 
 
@@ -226,7 +313,7 @@ def get_shot(resolve=None) -> ShotInfo:
         raise ResolveError(f"No clip selected, and no clip with source media under the playhead "
                            f"({timeline.GetCurrentTimecode()}) on an enabled video track.")
 
-    shot = _shot_from_item(project, timeline, item)
+    shot = _shot_from_item(resolve, project, timeline, item)
     logger.info(f"Pulled from {source}: {shot.clip_name} V{shot.track_index}, "
                 f"source {shot.source_first}-{shot.source_last} ({shot.duration} frames)")
     return shot
@@ -250,6 +337,7 @@ class CompPlacement:
     track: int
     record_in: int
     source_first: int
+    retimed: bool = False    # frames are output frames (retime baked in), not source frames
 
 
 @dataclass
@@ -296,8 +384,12 @@ def _anchor(timeline, comp: CompPlacement, placement: str, warnings: list) -> tu
     if placement == "follow_clip":
         item = find_item_by_id(timeline, comp.item_id)
         if item is not None:
-            # # Align by source frame, so a moved or trimmed clip still lines up.
-            record = item.GetStart() + (comp.first - item_source_first(item))
+            if comp.retimed:
+                # # The retime is baked into the comp: its first frame goes at the clip's start.
+                record = item.GetStart() + (comp.first - comp.source_first)
+            else:
+                # # Align by source frame, so a moved or trimmed clip still lines up.
+                record = item.GetStart() + (comp.first - item_source_first(item))
             return "follow_clip", record, item.GetTrackTypeAndIndex()[1]
         warnings.append("The original clip isn't in the timeline any more (deleted or replaced), "
                         "so the comp goes at the position stored when the shot was pulled.")
@@ -439,13 +531,20 @@ def place_comp(comp: CompPlacement, placement: str = "follow_clip", bin_path: st
     if clip is None:
         clip = _import_sequence(media_pool, folder, comp)
 
+    # # Tag the comp with the colour space Nuke wrote, so it doesn't depend on
+    # # the project's input colour space (a Canon-primary project, say).
+    warnings = list(plan.warnings)
+    if clip.GetClipProperty("Input Color Space") != config.WRITE_RESOLVE_COLORSPACE:
+        if not clip.SetClipProperty("Input Color Space", config.WRITE_RESOLVE_COLORSPACE):
+            warnings.append(f"Couldn't tag the comp's Input Color Space as '{config.WRITE_RESOLVE_COLORSPACE}'. "
+                            f"Set it in the Color page.")
+
     # # For sequences, start/endFrame are file frame numbers and endFrame is exclusive.
     placed = media_pool.AppendToTimeline([{"mediaPoolItem": clip, "startFrame": comp.first, "endFrame": comp.last + 1,
                                            "trackIndex": plan.track, "recordFrame": plan.record_in}])
     if not placed:
         raise ResolveError(f"Resolve couldn't place the comp on V{plan.track} at frame {plan.record_in}.")
     item = placed[0]
-    warnings = list(plan.warnings)
     if (item.GetStart(), item.GetDuration()) != (plan.record_in, plan.duration):
         warnings.append(f"Resolve placed the comp at {item.GetStart()} for {item.GetDuration()} frames, "
                         f"expected {plan.record_in} for {plan.duration}.")

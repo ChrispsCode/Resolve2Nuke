@@ -46,6 +46,12 @@ def find_bin(path):
     return folder
 
 
+def fcpxml_start(item):
+    """The source's start in seconds, from its start timecode (24 fps BRAW)."""
+    h, m, sec, f = (int(x) for x in item.GetMediaPoolItem().GetClipProperty("Start TC").split(":"))
+    return h * 3600 + m * 60 + sec + f / 24.0
+
+
 def make_test_timeline():
     """A fresh timeline with the baseline cut: the BRAW, source 107-145, at 01:00:00:00 on V1."""
     braw = []
@@ -63,6 +69,9 @@ def make_test_timeline():
     project.SetCurrentTimeline(tl)
     # # Movie clips: startFrame is 0-based, endFrame exclusive (106, 145 -> left offset 106, 39 frames)
     mp.AppendToTimeline([{"mediaPoolItem": braw[0], "startFrame": 106, "endFrame": 145, "trackIndex": 1, "recordFrame": tl.GetStartFrame()}])
+    # # The same cut at 50%, at 01:00:04:04 (AppendToTimeline always targets the *current* timeline)
+    slow = mp.AppendToTimeline([{"mediaPoolItem": braw[0], "startFrame": 106, "endFrame": 145, "trackIndex": 1, "recordFrame": 86500}])
+    slow[0].SetSpeed({"Percentage": 50.0})
     return tl
 
 
@@ -218,6 +227,67 @@ try:
     check("run_send: summary dialog", out and len(messages) == 1 and "V2" in messages[0] and "VFX/test_tree_sc010_sh010" in messages[0], messages)
     cleanup_resolve()
 
+    # #================ RETIMES
+    check("not retimed: no curve, frame-for-frame", not shot.retimed and shot.frame_for_frame)
+    timeline.SetCurrentTimecode("01:00:04:04")
+    slow = resolve_bridge.get_shot()
+    timeline.SetCurrentTimecode("01:00:00:00")
+    check("50%: retimed, not a ramp, nearest", slow.retimed and not slow.is_ramp and slow.retime_nearest and abs(slow.speed - 50) < 0.01)
+    check("50%: output 107-145", (slow.source_first, slow.source_last) == (107, 145), (slow.source_first, slow.source_last))
+    check("50%: source frames 107, 107.5, 108...", [round(f, 3) for f in slow.retime_frames[:4]] == [107.0, 107.5, 108.0, 108.5], slow.retime_frames[:4])
+    keys = shot_build.retime_keys(slow)
+    check("50%: nearest keys floor", keys[:4] == [(107, 107.0), (108, 107.0), (109, 108.0), (110, 108.0)], keys[:4])
+
+    nuke.scriptClear()
+    res = shot_build.build(slow)
+    k = res.kronos
+    check("kronos: Frame mode, between Read and Write", k is not None and k["timing2"].value() == "Frame"
+          and k.input(0) is res.read and res.write.input(0) is k)
+    check("kronos: a key on every output frame", len(k["timingFrame2"].animation(0).keys()) == 39)
+    check("kronos: values", [k["timingFrame2"].valueAt(f) for f in (107, 108, 109, 145)] == [107.0, 107.0, 108.0, 126.0],
+          [k["timingFrame2"].valueAt(f) for f in (107, 108, 109, 145)])
+    pts = [(x * 400 + .5, y * 300 + .5) for x in range(1, 10) for y in range(1, 7)]
+    diff = max(abs(k.sample("rgba.green", x, y, frame=109) - res.read.sample("rgba.green", x, y, frame=108)) for x, y in pts)
+    check("kronos: output 109 is source 108", diff < 1e-4, diff)
+    check("retimed stamp", stamp.read_stamp(res.write).retimed == 1)
+    check("root range = output frames", (nuke.root()["first_frame"].value(), nuke.root()["last_frame"].value()) == (107, 145))
+
+    # # Send a retimed comp: first frame at the clip's start, tagged colour space
+    w = res.write
+    w["use_limit"].setValue(True); w["first"].setValue(107); w["last"].setValue(110)
+    nuke.execute(w, 107, 110)
+    pr = send_back.send(w)
+    check("retimed send: follow clip -> 86500-86503", (pr.placement, pr.record_in, pr.record_out) == ("follow_clip", 86500, 86503),
+          (pr.placement, pr.record_in, pr.record_out))
+    placed = timeline.GetItemListInTrack("video", pr.track)[0]
+    check("send tags Input Color Space", placed.GetMediaPoolItem().GetClipProperty("Input Color Space") == config.WRITE_RESOLVE_COLORSPACE,
+          placed.GetMediaPoolItem().GetClipProperty("Input Color Space"))
+    cleanup_resolve()
+
+    # # Harry's speed ramp on Timeline 1 (read-only)
+    tl1 = next((project.GetTimelineByIndex(i) for i in range(1, project.GetTimelineCount() + 1)
+                if project.GetTimelineByIndex(i).GetName() == "Timeline 1"), None)
+    ramp_item = next((i for t in range(1, tl1.GetTrackCount("video") + 1) for i in tl1.GetItemListInTrack("video", t) or []
+                      if i.GetName().startswith("A010_07261620_C004")), None) if tl1 else None
+    if ramp_item is None:
+        print("SKIP  ramp: A010_07261620_C004 not on Timeline 1")
+    else:
+        ramp = resolve_bridge._shot_from_item(resolve, project, tl1, ramp_item)
+        src0 = (ramp_item.GetSourceStartTime() - fcpxml_start(ramp_item)) * ramp.clip_fps + 1
+        check("ramp: is a ramp, nearest", ramp.retimed and ramp.is_ramp and ramp.retime_nearest)
+        check("ramp: first source frame matches Resolve", abs(ramp.retime_frames[0] - src0) < 0.05, (ramp.retime_frames[0], src0))
+        check("ramp: output numbered from first source frame", ramp.source_first == int(ramp.retime_frames[0]))
+        steps = [b - a for a, b in zip(ramp.retime_frames, ramp.retime_frames[1:])]
+        check("ramp: fast, then eases up to 1x", steps[0] > 5 and min(steps) < 0.6 and abs(steps[-1] - 1) < 0.02, (round(steps[0], 2), round(min(steps), 2), round(steps[-1], 2)))
+
+    # # Colour tag rules
+    canon = dataclasses.replace(shot, file_path="/x/IMG.MP4", codec="H.265 Main 4:2:2 10 L5.1")
+    check("tag: untagged non-BRAW warns", dataclasses.replace(canon, colorspace_from_project=True).colour_tag_warning())
+    check("tag: BMD-tagged comp EXR is fine", dataclasses.replace(canon, file_path="/x/c_comp.%04d.exr", codec="").colour_tag_warning() is None)
+    check("tag: Canon tagged Canon is fine", dataclasses.replace(canon, resolve_colorspace="Canon Cinema Gamut/Canon Log 3").colour_tag_warning() is None)
+    check("tag: BRAW tagged BMD is fine", shot.colour_tag_warning() is None)
+    check("tag: BRAW tagged Canon warns", dataclasses.replace(shot, resolve_colorspace="Canon Cinema Gamut/Canon Log 3").colour_tag_warning())
+
     # #================ BIN EVALUATION
     check("bin: hozed", send_back.evaluate_bin("VFX/[getenv SHOT_NAME]") == ("VFX/test_tree_sc010_sh010", None))
     path, why = send_back.evaluate_bin("VFX/[getenv R2N_UNSET_VAR]")
@@ -267,6 +337,18 @@ try:
     check("follow maths: moved +100, trimmed 5", resolve_bridge._anchor(FakeTimeline(FakeItem(86600, 111)), comp, "follow_clip", [])[1] == 86595)
     check("follow maths: head extended 10", resolve_bridge._anchor(FakeTimeline(FakeItem(86390, 96)), comp, "follow_clip", [])[1] == 86400)
     check("seq path", resolve_bridge._nuke_path("/a/r.[0107-0145].exr") == ("/a/r.%04d.exr", True))
+
+    # # A 200% clip on V2 (FCPXML nests it in the V1 clip as lane 1). Added last: it occupies V2.
+    while timeline.GetTrackCount("video") < 2:
+        timeline.AddTrack("video")
+    braw_mpi = timeline.GetItemListInTrack("video", 1)[0].GetMediaPoolItem()
+    fast = mp.AppendToTimeline([{"mediaPoolItem": braw_mpi, "startFrame": 120, "endFrame": 150, "trackIndex": 2, "recordFrame": 86410}])[0]
+    fast.SetSpeed({"Percentage": 200.0})
+    timeline.SetCurrentTimecode("01:00:00:12")
+    v2 = resolve_bridge.get_shot()
+    timeline.SetCurrentTimecode("01:00:00:00")
+    check("V2 200%: picked, lane read, 121, 123, 125", v2.track_index == 2 and v2.retimed and [round(f, 3) for f in v2.retime_frames[:3]] == [121.0, 123.0, 125.0],
+          (v2.track_index, v2.retime_frames[:3] if v2.retimed else None))
 
     calls = []
 

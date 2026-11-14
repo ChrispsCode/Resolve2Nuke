@@ -60,6 +60,7 @@ class SendInfo:
             track=self.stamp.track,
             record_in=self.stamp.record_in,
             source_first=self.stamp.source_first,
+            retimed=bool(self.stamp.retimed),
         )
 
 

@@ -83,7 +83,15 @@ def _label() -> QtWidgets.QLabel:
     label = QtWidgets.QLabel()
     label.setTextFormat(QtCore.Qt.RichText)
     label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+    # # Wrap, so long warnings don't clip or squeeze the form's label column.
+    label.setWordWrap(True)
+    label.setMinimumWidth(380)
     return label
+
+
+def _elide_path(path: str, label: QtWidgets.QLabel, width: int = 400) -> str:
+    """Shorten a long path in the middle to fit, keeping the file name readable."""
+    return label.fontMetrics().elidedText(path, QtCore.Qt.ElideMiddle, width)
 
 
 class _Dialog(QtWidgets.QDialog):
@@ -92,7 +100,7 @@ class _Dialog(QtWidgets.QDialog):
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         self.setWindowTitle(f"Resolve2Nuke - {title}")
         self.setWindowIcon(QtGui.QIcon(config.ICON_PATH))
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(560)
         self.layout_ = QtWidgets.QVBoxLayout(self)
 
         self.summary = QtWidgets.QFormLayout()
@@ -102,6 +110,8 @@ class _Dialog(QtWidgets.QDialog):
         self.layout_.addWidget(box)
 
     def _buttons(self, action_text: str) -> None:
+        # # Spare height goes here, not into the group boxes.
+        self.layout_.addStretch(1)
         row = QtWidgets.QHBoxLayout()
         self.refresh_button = QtWidgets.QPushButton("↻ Refresh")
         self.refresh_button.setToolTip("Read Resolve and the script again")
@@ -129,11 +139,12 @@ class PullDialog(_Dialog):
         self._shot: resolve_bridge.ShotInfo | None = None
         defaults = settings.load_shot_options()
 
-        self.clip_label, self.position_label, self.source_label, self.colour_label, self.fps_label = (
-            _label() for _ in range(5))
+        self.clip_label, self.position_label, self.source_label, self.retime_label, self.colour_label, self.fps_label = (
+            _label() for _ in range(6))
         self.summary.addRow("Clip:", self.clip_label)
         self.summary.addRow("Timeline:", self.position_label)
         self.summary.addRow("Source:", self.source_label)
+        self.summary.addRow("Retime:", self.retime_label)
         self.summary.addRow("Colour:", self.colour_label)
         self.summary.addRow("FPS:", self.fps_label)
 
@@ -193,7 +204,7 @@ class PullDialog(_Dialog):
         except resolve_bridge.ResolveError as e:
             self._shot = None
             self.clip_label.setText(_html(str(e), RED))
-            for label in (self.position_label, self.source_label, self.colour_label, self.fps_label):
+            for label in (self.position_label, self.source_label, self.retime_label, self.colour_label, self.fps_label):
                 label.setText("")
         self._update_labels()
         self._update_enabled()
@@ -207,19 +218,41 @@ class PullDialog(_Dialog):
                                     + _html(f"   ({shot.project_name})", GREY))
         handles = self.handles.value() if self.set_frame_range.isChecked() else 0
         rng = f"{shot.source_first}-{shot.source_last} ({shot.duration} frames)"
+        if shot.retimed:
+            rng += _html("  ·  output frames", GREY)
         if handles:
-            rng += _html(f"   script range {shot.source_first - handles}-{shot.source_last + handles}", GREY)
+            rng += _html(f"  ·  script range {shot.source_first - handles}-{shot.source_last + handles}", GREY)
         self.source_label.setText(rng)
+
+        if shot.retimed:
+            lo, hi = int(min(shot.retime_frames)), int(max(shot.retime_frames))
+            kind = f"speed ramp (average {shot.speed:.0f}%)" if shot.is_ramp else f"{shot.speed:g}%"
+            mode = "nearest frame" if shot.retime_nearest else "blended"
+            self.retime_label.setText(_html(f"{kind}, source {lo}-{hi}", ORANGE) + "<br>"
+                                      + _html(f"→ Kronos (Frame), a key on every frame, {mode}", GREY))
+        else:
+            self.retime_label.setText(_html("none", GREY))
+
         ocio = config.RESOLVE_TO_OCIO.get(shot.resolve_colorspace)
         if ocio:
-            self.colour_label.setText(_html(f"{shot.resolve_colorspace}  →  {ocio}"))
+            text = _html(f"{shot.resolve_colorspace}  →  {ocio}")
         else:
-            self.colour_label.setText(_html(f"{shot.resolve_colorspace}  →  unknown, the Read will need setting by hand", RED))
+            text = _html(f"{shot.resolve_colorspace}  →  unknown, the Read will need setting by hand", RED)
+        tag_warning = shot.colour_tag_warning()
+        if tag_warning:
+            text += "<br>" + _html(tag_warning, ORANGE)
+        self.colour_label.setText(text)
+
         if abs(shot.clip_fps - shot.timeline_fps) < 0.001:
             self.fps_label.setText(f"{shot.timeline_fps:g}")
+        elif shot.retimed:
+            self.fps_label.setText(_html(f"clip {shot.clip_fps:g}, timeline {shot.timeline_fps:g}", ORANGE))
+        elif shot.frame_for_frame:
+            self.fps_label.setText(f"timeline {shot.timeline_fps:g}" + _html(
+                f"   clip {shot.clip_fps:g}, played frame-for-frame (1:1)", GREY))
         else:
-            self.fps_label.setText(_html(f"clip {shot.clip_fps:g}, timeline {shot.timeline_fps:g}: "
-                                         f"Resolve retimes the clip, frames won't map 1:1", ORANGE))
+            self.fps_label.setText(_html(f"clip {shot.clip_fps:g}, timeline {shot.timeline_fps:g}: Resolve isn't "
+                                         f"playing it frame-for-frame, so frames won't map 1:1", ORANGE))
 
     def _update_enabled(self) -> None:
         shot = self._shot
@@ -267,7 +300,6 @@ class SendDialog(_Dialog):
         self.bin.setToolTip(f"Media pool bin. TCL is evaluated, '/' makes nested bins.\nDefault: {config.DEFAULT_BIN}")
         self.bin_label = _label()
         self.preview_label = _label()
-        self.preview_label.setWordWrap(False)
         form.addRow("Place:", self.placement)
         form.addRow("Bin:", self.bin)
         form.addRow("", self.bin_label)
@@ -301,7 +333,9 @@ class SendDialog(_Dialog):
 
     def _update_summary(self) -> None:
         info = self._info
-        self.write_label.setText(_html(info.write.name(), bold=True) + "<br>" + _html(nuke.filename(info.write), GREY))
+        path = nuke.filename(info.write)
+        self.write_label.setText(_html(info.write.name(), bold=True) + "<br>" + _html(_elide_path(path, self.write_label), GREY))
+        self.write_label.setToolTip(path)
         rng = f"{info.first}-{info.last} ({info.frame_count} frames)"
         if info.missing:
             self.frames_label.setText(_html(rng) + "<br>" + _html(
@@ -325,9 +359,9 @@ class SendDialog(_Dialog):
             p = self._plan
             text = _html(f"→ V{p.track} at {p.record_in_tc}, {p.duration} frames", bold=True)
             if p.placement != options.placement:
-                text += _html(f"   (fell back to {p.placement.replace('_', ' ')})", ORANGE)
+                text += _html(f"  ·  fell back to {p.placement.replace('_', ' ')}", ORANGE)
             if p.reuse_media:
-                text += _html("   reusing the clip in the bin", GREY)
+                text += _html("  ·  reusing the clip in the bin", GREY)
             # # The bin fallback is already shown under the bin field.
             for w in [w for w in p.warnings if not w.startswith("Bin ")]:
                 text += "<br>" + _html(w, ORANGE)

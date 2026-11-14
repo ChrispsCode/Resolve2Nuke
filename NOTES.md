@@ -54,6 +54,23 @@ In the GUI, both menu commands open a non-modal dialog (`dialogs.py`). With `opt
 - **Shared logic:** `actions.py` holds the run-and-report logic used by both the dialogs and the direct calls.
 - **Remembered settings:** `settings.py` remembers fps source, handles, placement and bin per user in QSettings, when `config.REMEMBER_SETTINGS` is True. The checkboxes always start ticked, so a secondary-plate pull never leaves the next main-plate pull half set up.
 
+### 4. Retimes, colour tagging, small fixes (v0.4.0)
+
+- **Retime pull:**
+  - Every pull exports the current timeline as FCPXML to a temp folder (`fcpxml.py`, no nuke or Qt imports), and finds the clip by record time and track.
+  - A `<timeMap>` means the clip is retimed. Its curve is evaluated at every output frame: linear corners, and `smooth2` keys as a quadratic Bézier from `inTime` before the key to `outTime` after it.
+  - The pull adds a **Kronos** between the Read and the Write, with `timing2 = Frame` and a `timingFrame2` key on every frame (linear). Keys are whole frames (floored, like Resolve) when Resolve's retime process is Nearest (the clip's, or the project's `imageRetimeInterpolation` when the clip says "use project"), and fractional otherwise.
+  - Output frames are numbered from the cut's first source frame. The Read keeps the whole clip.
+- **Retimed send:**
+  - The comp has the retime baked in, so `follow_clip` puts its first frame at the clip's start: `record = clip start + (frame − first)`.
+  - The stamp's `retimed` field says which kind of comp it is. (Old stamps were allowed to break, since none are in production.)
+- **The send tags the comp's Input Color Space** as `config.WRITE_RESOLVE_COLORSPACE` ("Blackmagic Design Film Gen 5", matching the Write). The comp then doesn't depend on the project's input colour space, so a Canon-primary project works the same way.
+- **Pull dialog:**
+  - a Retime row (orange when retimed: speed, or ramp with its average);
+  - a colour-tag check (orange): an untagged non-BRAW clip, a Blackmagic tag on a non-BRAW file, or a non-Blackmagic tag on a BRAW;
+  - the fps line now *checks* frame-for-frame playback, using (source end − source start time) × clip fps against the duration, instead of always warning.
+- **`tests/gui_preview.py`** renders both dialogs offscreen to PNGs (using Nuke's bundled Python, a stubbed `nuke` and fake data). It caught clipped warnings and a squeezed form label, now fixed with word-wrapped labels and middle-elided paths.
+
 ## Decisions and why
 
 - **Nuke 17.1+ only.** 17.1's BRAW reader uses SDK 5.1 (15.2's uses 2.2, Resolve 21 uses 5.x). `DaVinciResolveScript` imports in-process in 17.1, while in 15.2 Resolve's `fusionscript.so` fails on a libc++ symbol clash. `menu.py` prints a red warning in 15.
@@ -85,15 +102,30 @@ In the GUI, both menu commands open a non-modal dialog (`dialogs.py`). With `opt
 - **Rendering** needs a Media Storage location as the target (`~/Videos` works; the scratchpad and `~/Documents` don't). **Importing** from anywhere works.
 - `Timeline.SetTrackEnable(False)` didn't affect a render. `TimelineItem.SetClipEnabled(False)` did.
 - No API moves a timeline item, so `follow_clip` is tested with fake items, plus a GUI check.
+- **`MediaPool.AppendToTimeline` always adds to the *current* timeline**, whatever timeline object you have in hand. Switch with `project.SetCurrentTimeline()` first, or the clip lands on the wrong timeline.
+- **Retimed clips:** `GetLeftOffset()` is counted in timeline frames (a 50% clip from source 106 reports 212). `GetSpeed()` gives the average speed for a ramp. `GetSourceStartTime()` is right. The full curve is only in the FCPXML export (OTIO and FCP 7 XML only give a constant speed).
+- **FCPXML layout:**
+  - V1 clips sit in `<spine>`, with absolute offsets.
+  - V2+ clips are nested inside the V1 clip they overlap, as `lane="n"`, with an offset in the parent's local time: absolute = parent offset + (offset − parent start).
+  - `<timeMap>` points pair the clip's local time with source time, in the source's own seconds (the asset's `start` = the source's start timecode).
+- **Input colour space** is the clip property `Input Color Space`. Tagging in the Color page (right-click the thumbnail) sets it, and `SetClipProperty` can set it too.
+- **The mapped Media Storage** (2026-11-14): `~/Videos`, `~/DaVinci Resolve Media`, `~/Documents/DevTest`.
+- **Resolve on Linux can encode ProRes** (422 to 4444 XQ) and DNxHR 444. Nuke 17.1 on Linux can't decode HEVC 4:2:2 10-bit (Canon R6).
 - Unique IDs survive a Resolve restart.
 - The MCP `run_script` has a 10 s limit. Start renders in one call and poll in another, and restore settings in the polling call.
 
 ## Roadmap
 
 - [ ] GUI for pull (`ShotOptions` as checkboxes, with fps source greyed out when the clip and timeline match, plus a confirmation) and for send (placement mode, plus a bin line edit defaulting to `VFX/[SHOT_NAME]` so many shots and versions stay tidy; nested bins need creating level by level).
-- [ ] Warn when the Resolve clip has a speed change, because the source range is wrong then.
+- [x] Retimes: Kronos (Frame) from Resolve's curve (v0.4.0).
+- [ ] **Template plate** (pass 2):
+  - an option in the pull, off by default, hozed only;
+  - Resolve renders the clip with its effects into a staging folder in `~/DaVinci Resolve Media/Resolve2Nuke/`, then the pull moves it to `plates/<SHOT>_plate_v##[/...].exr|.mov`;
+  - EXR (half, ZIP) or ProRes 4444 XQ, encoded as BMD Film Gen5 / WG Gen5;
+  - an optional switch to the clip's resolution;
+  - the cut range only.
 - [ ] Versioned Write paths (the `v01` is hard-coded). Harry plans a better path setter.
-- [ ] More pixel-tested colour mappings (Canon R6 / Canon Log 3 next).
+- [ ] More pixel-tested colour mappings. Canon may not need one: template plates come out as BMD Film.
 - [ ] Drop-frame timelines for playhead pick and placement.
 - [ ] Optional system-Python fallback for the Resolve connection.
 

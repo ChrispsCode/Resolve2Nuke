@@ -32,6 +32,7 @@ class Stamp:
     source_first: int
     source_last: int
     timeline_fps: float
+    retimed: int            # 1 when the Read is retimed by a Kronos (frames are output frames)
 
     @classmethod
     def from_shot(cls, shot: ShotInfo) -> Stamp:
@@ -47,6 +48,7 @@ class Stamp:
             source_first=shot.source_first,
             source_last=shot.source_last,
             timeline_fps=shot.timeline_fps,
+            retimed=int(shot.retimed),
         )
 
 
@@ -63,6 +65,7 @@ _LABELS = {
     "source_first": "source first",
     "source_last": "source last",
     "timeline_fps": "timeline fps",
+    "retimed": "retimed",
 }
 
 # # Field types are strings here (from __future__ import annotations)

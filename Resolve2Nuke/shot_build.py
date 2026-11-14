@@ -11,6 +11,7 @@ GUI will show ShotOptions as checkboxes.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import nuke
@@ -37,6 +38,7 @@ class BuildResult:
     read: nuke.Node
     write: nuke.Node | None
     unknown_colorspace: bool
+    kronos: nuke.Node | None = None
 
 
 # #----------------------------------------------------------------------------
@@ -101,16 +103,49 @@ def _create_read(shot: ShotInfo) -> tuple[nuke.Node, bool]:
     if not unknown:
         read["colorspace"].setValue(ocio_space)
 
-    read["label"].setValue(f"{shot.timeline_name} V{shot.track_index}\n{shot.source_first}-{shot.source_last}")
+    if shot.retimed:
+        lo, hi = int(min(shot.retime_frames)), int(max(shot.retime_frames))
+        read["label"].setValue(f"{shot.timeline_name} V{shot.track_index}\nsource {lo}-{hi}, retimed")
+    else:
+        read["label"].setValue(f"{shot.timeline_name} V{shot.track_index}\n{shot.source_first}-{shot.source_last}")
     stamp.write_stamp(read, stamp.Stamp.from_shot(shot))
     return read, unknown
+
+
+def retime_keys(shot: ShotInfo) -> list[tuple[int, float]]:
+    """(output frame, source frame) for every output frame. Whole frames when
+    Resolve uses Nearest (it floors), fractional ones for frame blend / optical flow."""
+    keys = []
+    for i, source in enumerate(shot.retime_frames):
+        value = float(math.floor(source + 1e-6)) if shot.retime_nearest else source
+        keys.append((shot.source_first + i, value))
+    return keys
+
+
+def _create_kronos(read: nuke.Node, shot: ShotInfo) -> nuke.Node:
+    """Resolve's retime as a Kronos in Frame mode, with a key on every output frame."""
+    for n in nuke.selectedNodes():
+        n.setSelected(False)
+    read.setSelected(True)
+    kronos = nuke.createNode("Kronos", inpanel=False)  # # connects to and sits under the Read
+    kronos["timing2"].setValue("Frame")
+    knob = kronos["timingFrame2"]
+    knob.setAnimated()
+    for frame, value in retime_keys(shot):
+        knob.setValueAt(value, frame)
+    curve = knob.animation(0)
+    curve.changeInterpolation(curve.keys(), nuke.LINEAR)
+    kind = "ramp" if shot.is_ramp else f"{shot.speed:g}%"
+    mode = "nearest" if shot.retime_nearest else "blended"
+    kronos["label"].setValue(f"Resolve retime: {kind}\n{mode}")
+    return kronos
 
 
 def _create_write(read: nuke.Node, shot: ShotInfo) -> nuke.Node:
     for n in nuke.selectedNodes():
         n.setSelected(False)
     read.setSelected(True)
-    write = nuke.createNode("Write", inpanel=False)  # # connects to and sits under the selected Read
+    write = nuke.createNode("Write", inpanel=False)  # # connects to and sits under the selected node
     write["file_type"].setValue("exr")
     write["file"].setValue(config.WRITE_FILE)
     write["colorspace"].setValue(config.WRITE_COLORSPACE)
@@ -127,7 +162,7 @@ def _create_write(read: nuke.Node, shot: ShotInfo) -> nuke.Node:
 def build(shot: ShotInfo, options: ShotOptions | None = None) -> BuildResult:
     """Apply the shot to the current script in one undo step."""
     options = options or ShotOptions()
-    read = write = None
+    read = write = kronos = None
     unknown = False
 
     nuke.Undo.begin("Pull shot from Resolve")
@@ -143,12 +178,11 @@ def build(shot: ShotInfo, options: ShotOptions | None = None) -> BuildResult:
         if not options.set_frame_range:
             root["first_frame"].setValue(range_before[0])
             root["last_frame"].setValue(range_before[1])
+        if shot.retimed:
+            kronos = _create_kronos(read, shot)
         if options.create_write:
-            write = _create_write(read, shot)
+            write = _create_write(kronos or read, shot)
     finally:
         nuke.Undo.end()
 
-    if options.set_fps and shot.clip_fps and abs(shot.clip_fps - shot.timeline_fps) > 0.001:
-        logger.warning(f"Clip is {shot.clip_fps:g} fps but the timeline is {shot.timeline_fps:g} fps. "
-                       f"Resolve retimes the clip, so source frames won't map 1:1 to timeline frames.")
-    return BuildResult(read=read, write=write, unknown_colorspace=unknown)
+    return BuildResult(read=read, write=write, unknown_colorspace=unknown, kronos=kronos)

@@ -70,6 +70,9 @@ BRAW_DECODE_USING = "Camera Metadata"
 
 WRITE_FILE = "[getenv SHOT_ROOT]/renders/comp/c_[getenv SHOT_NAME]_comp_v01/c_[getenv SHOT_NAME]_comp_v01.%04d.exr"
 WRITE_COLORSPACE = "BMDFilm WideGamut Gen5"
+# # The same colour space by Resolve's name. Sent comps are tagged with it, so
+# # they don't depend on the project's input colour space.
+WRITE_RESOLVE_COLORSPACE = "Blackmagic Design Film Gen 5"
 WRITE_DATATYPE = "16 bit half"
 
 # #----------------------------------------------------------------------------
