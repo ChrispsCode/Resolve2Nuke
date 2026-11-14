@@ -68,7 +68,7 @@ BRAW_DECODE_USING = "Camera Metadata"
 # #----------------------------------------------------------------------------
 # # Write
 
-WRITE_FILE = "[getenv SHOT_ROOT]/renders/comp/c_[getenv SHOT_NAME]_comp_v01.%04d.exr"
+WRITE_FILE = "[getenv SHOT_ROOT]/renders/comp/c_[getenv SHOT_NAME]_comp_v01/c_[getenv SHOT_NAME]_comp_v01.%04d.exr"
 WRITE_COLORSPACE = "BMDFilm WideGamut Gen5"
 WRITE_DATATYPE = "16 bit half"
 

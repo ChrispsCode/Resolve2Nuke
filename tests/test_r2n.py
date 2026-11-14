@@ -1,0 +1,293 @@
+"""Resolve2Nuke headless tests. Needs Resolve open on the VFX Test project (one BRAW on V1 at 01:00:00:00).
+
+/opt/Nuke17.1v1/Nuke17.1 -ti tests/test_r2n.py   (renders go to $R2N_TEST_DIR, default /tmp/r2n_test)
+"""
+import dataclasses
+import os
+import traceback
+
+SCRATCH = os.environ.get("R2N_TEST_DIR", "/tmp/r2n_test")
+os.environ["SHOT_ROOT"] = f"{SCRATCH}/shotroot"
+os.environ["SHOT_NAME"] = "test_tree_sc010_sh010"
+
+import nuke
+
+results = []
+
+
+def check(name, cond, detail=""):
+    results.append((name, bool(cond)))
+    print(f"{'PASS' if cond else 'FAIL'}  {name}" + (f"   [{detail}]" if detail else ""))
+
+
+import Resolve2Nuke
+from Resolve2Nuke import config, resolve_bridge, send_back, settings, shot_build, stamp
+from Resolve2Nuke.qt import QtCore
+
+print("Resolve2Nuke", Resolve2Nuke.__version__)
+messages = []
+nuke.message = lambda m: messages.append(m)
+config.SETTINGS_ORG = "Resolve2NukeTest"
+
+resolve = resolve_bridge.connect()
+project = resolve.GetProjectManager().GetCurrentProject()
+mp = project.GetMediaPool()
+user_timeline = project.GetCurrentTimeline()
+TEST_TIMELINE = "R2N Test"
+TEST_BINS = ["VFX/test_tree_sc010_sh010", "Comps/A", "Comps"]  # # only these are ever deleted
+
+
+def find_bin(path):
+    folder = mp.GetRootFolder()
+    for name in path.split("/"):
+        folder = next((f for f in folder.GetSubFolderList() or [] if f.GetName() == name), None)
+        if folder is None:
+            return None
+    return folder
+
+
+def make_test_timeline():
+    """A fresh timeline with the baseline cut: the BRAW, source 107-145, at 01:00:00:00 on V1."""
+    braw = []
+
+    def walk(folder):
+        braw.extend(c for c in folder.GetClipList() or [] if c.GetName() == "A001_08241708_C025.braw")
+        for sub in folder.GetSubFolderList() or []:
+            walk(sub)
+    walk(mp.GetRootFolder())
+    for i in range(project.GetTimelineCount(), 0, -1):
+        t = project.GetTimelineByIndex(i)
+        if t.GetName() == TEST_TIMELINE:
+            mp.DeleteTimelines([t])
+    tl = mp.CreateEmptyTimeline(TEST_TIMELINE)
+    project.SetCurrentTimeline(tl)
+    # # Movie clips: startFrame is 0-based, endFrame exclusive (106, 145 -> left offset 106, 39 frames)
+    mp.AppendToTimeline([{"mediaPoolItem": braw[0], "startFrame": 106, "endFrame": 145, "trackIndex": 1, "recordFrame": tl.GetStartFrame()}])
+    return tl
+
+
+timeline = make_test_timeline()
+
+
+def cleanup_resolve():
+    """Empty the test timeline above V1 and delete only the bins the tests make."""
+    for t in range(timeline.GetTrackCount("video"), 1, -1):
+        items = timeline.GetItemListInTrack("video", t) or []
+        if items:
+            timeline.DeleteClips(items, False)
+        timeline.DeleteTrack("video", t)
+    for path in TEST_BINS:
+        folder = find_bin(path)
+        if folder is not None:
+            mp.DeleteFolders([folder])
+    vfx = find_bin("VFX")
+    if vfx is not None and not vfx.GetClipList() and not vfx.GetSubFolderList():
+        mp.DeleteFolders([vfx])
+
+
+def snapshot():
+    tracks = timeline.GetTrackCount("video")
+    items = [(t, i.GetUniqueId()) for t in range(1, tracks + 1) for i in timeline.GetItemListInTrack("video", t) or []]
+    bins = sorted(f.GetName() for f in mp.GetRootFolder().GetSubFolderList() or [])
+    return tracks, items, bins
+
+
+def v_items(track):
+    return [(i.GetName(), i.GetStart(), i.GetEnd() - 1, i.GetLeftOffset()) for i in timeline.GetItemListInTrack("video", track) or []]
+
+
+cleanup_resolve()
+timeline.SetCurrentTimecode("01:00:00:00")
+
+try:
+    # #================ PULL
+    shot = resolve_bridge.get_shot()
+    check("bridge: source 107-145", (shot.source_first, shot.source_last) == (107, 145), (shot.source_first, shot.source_last))
+    check("bridge: test timeline", shot.timeline_name == TEST_TIMELINE)
+    check("bridge: record 86400-86438, TC", (shot.record_in, shot.record_out, shot.record_in_tc) == (86400, 86438, "01:00:00:00"))
+    check("bridge: colour/res/fps/track", (shot.resolve_colorspace, shot.width, shot.height, shot.clip_fps, shot.timeline_fps, shot.track_index)
+          == ("Blackmagic Design Film Gen 5", 4096, 2160, 24.0, 24.0, 1))
+
+    nuke.scriptClear()
+    while nuke.Undo.disabled():
+        nuke.Undo.enable()
+    res = Resolve2Nuke.pull_shot()  # # headless: runs directly, no dialog
+    root, r, w = nuke.root(), res.read, res.write
+    check("pull: root OCIO/fps/format/range", (root["OCIO_config"].value(), root["fps"].value(), root.format().width(),
+          root["first_frame"].value(), root["last_frame"].value()) == (config.OCIO_CONFIG, 24, 4096, 107, 145))
+    check("pull: read range/colour/decode", (r["first"].value(), r["last"].value(), r["colorspace"].value(), r["decode_using"].getValue())
+          == (1, 282, "BMDFilm WideGamut Gen5", 0))
+    check("pull: read timecode at 107", r.metadata("input/timecode", 107) == "12:00:07:12")
+    check("pull: write knobs", (w.input(0) is r, w["colorspace"].value(), w["datatype"].value(), w["create_directories"].value())
+          == (True, "BMDFilm WideGamut Gen5", "16 bit half", True))
+    check("pull: read and write stamped alike", stamp.read_stamp(w) == stamp.read_stamp(r) and stamp.read_stamp(r).item_id == shot.item_id)
+    nuke.undo()
+    check("pull: one undo step", not nuke.allNodes())
+
+    nuke.scriptClear()
+    before = (root["OCIO_config"].value(), root["fps"].value(), root.format().width(), root["first_frame"].value(), root["last_frame"].value())
+    res = shot_build.build(shot, shot_build.ShotOptions(False, False, "timeline", False, False, 0, False))
+    after = (root["OCIO_config"].value(), root["fps"].value(), root.format().width(), root["first_frame"].value(), root["last_frame"].value())
+    check("pull options off: root untouched, no write", before == after and res.write is None, (before, after))
+
+    nuke.scriptClear()
+    shot_build.build(dataclasses.replace(shot, clip_fps=25.0), shot_build.ShotOptions(handles=8, fps_source="clip"))
+    check("pull: handles 8, clip fps 25", (root["first_frame"].value(), root["last_frame"].value(), root["fps"].value()) == (99, 153, 25))
+
+    nuke.scriptClear()
+    messages.clear()
+    from Resolve2Nuke import actions
+    res = actions.run_pull(dataclasses.replace(shot, resolve_colorspace="Sony S-Log3"))
+    check("pull: unknown colour space dialog", res.unknown_colorspace and len(messages) == 1 and "Sony S-Log3" in messages[0])
+
+    # #================ SEND
+    nuke.scriptClear()
+    res = Resolve2Nuke.pull_shot()
+    w, r = res.write, res.read
+    try:
+        send_back.send(w)
+        check("send: missing frames raises", False)
+    except send_back.SendError as e:
+        check("send: missing frames raises", "missing 39 of 39" in str(e) and "107-145" in str(e), str(e))
+    nuke.execute(w, 107, 145)
+    info = send_back.gather(w)
+    check("render: all frames", not info.missing and info.frame_count == 39)
+
+    # # preview is read-only and matches the real placement
+    before = snapshot()
+    plans = {m: send_back.preview(info, send_back.SendOptions(m)) for m in resolve_bridge.PLACEMENTS}
+    check("preview: Resolve untouched", snapshot() == before, (before, snapshot()))
+    check("preview: nested bin path", plans["stored"].bin_path == "VFX/test_tree_sc010_sh010", plans["stored"].bin_path)
+    check("preview: V2 at 01:00:00:00", (plans["stored"].track, plans["stored"].record_in_tc) == (2, "01:00:00:00"))
+
+    pr = send_back.send(w, send_back.SendOptions("stored"))
+    check("stored: matches preview", (pr.track, pr.record_in, pr.record_out) == (2, 86400, 86438), (pr.track, pr.record_in, pr.record_out))
+    check("stored: source 107 at left offset 0", v_items(2) and v_items(2)[0][3] == 0, v_items(2))
+    shot_bin = find_bin("VFX/test_tree_sc010_sh010")
+    check("stored: clip in nested bin", shot_bin is not None and len(shot_bin.GetClipList()) == 1)
+    p2 = send_back.preview(send_back.gather(w), send_back.SendOptions("stored"))
+    check("preview after send: V3, reuse", (p2.track, p2.reuse_media) == (3, True), (p2.track, p2.reuse_media))
+    pr2 = send_back.send(w, send_back.SendOptions("stored"))
+    check("re-send: V3, reused media", (pr2.track, pr2.reused_media) == (3, True))
+    pr3 = send_back.send(w, send_back.SendOptions("stored", bin="Comps/A"))
+    check("other bin: fresh import there", (pr3.bin_path, pr3.reused_media, pr3.track) == ("Comps/A", False, 4), (pr3.bin_path, pr3.reused_media, pr3.track))
+    cleanup_resolve()
+
+    pr = send_back.send(w)
+    check("follow_clip: default, V2 86400", (pr.placement, pr.track, pr.record_in) == ("follow_clip", 2, 86400))
+    cleanup_resolve()
+
+    w["r2n_item_id"].setValue("not-a-real-id")
+    pr = send_back.send(w)
+    check("follow_clip gone: stored + warning", pr.placement == "stored" and any("isn't in the timeline" in x for x in pr.warnings), pr.warnings)
+    w["r2n_item_id"].setValue(stamp.read_stamp(r).item_id)
+    cleanup_resolve()
+
+    timeline.SetCurrentTimecode("01:00:00:10")
+    plan = send_back.preview(send_back.gather(w), send_back.SendOptions("playhead"))
+    pr = send_back.send(w, send_back.SendOptions("playhead"))
+    check("playhead: V2 at 86410, matches preview", (pr.track, pr.record_in) == (2, 86410) == (plan.track, plan.record_in))
+    timeline.SetCurrentTimecode("01:00:00:00")
+    cleanup_resolve()
+
+    w["use_limit"].setValue(True); w["first"].setValue(110); w["last"].setValue(120)
+    pr = send_back.send(w)
+    check("limit 110-120: 86403-86413", (pr.record_in, pr.record_out) == (86403, 86413) and v_items(2)[0][3] == 0)
+    w["use_limit"].setValue(False)
+    cleanup_resolve()
+
+    # # stamps and Write finding
+    w2 = nuke.nodes.Write(inputs=[r], file=w["file"].value(), file_type="exr")
+    check("unstamped write: uses Read's stamp", send_back.find_stamp(w2) == (stamp.read_stamp(r), []))
+    for n in nuke.selectedNodes():
+        n.setSelected(False)
+    try:
+        send_back.find_write()
+        check("two writes: raises", False)
+    except send_back.SendError as e:
+        check("two writes: raises", "Select the one" in str(e))
+    nuke.delete(w2)
+    w["r2n_item_id"].setValue("other-clip")
+    found, warns = send_back.find_stamp(w)
+    check("stamp mismatch: warns, uses Write", found.item_id == "other-clip" and warns)
+    w["r2n_item_id"].setValue(stamp.read_stamp(r).item_id)
+
+    # # send action reports
+    messages.clear()
+    out = actions.run_send(send_back.SendOptions("stored"), w)
+    check("run_send: summary dialog", out and len(messages) == 1 and "V2" in messages[0] and "VFX/test_tree_sc010_sh010" in messages[0], messages)
+    cleanup_resolve()
+
+    # #================ BIN EVALUATION
+    check("bin: hozed", send_back.evaluate_bin("VFX/[getenv SHOT_NAME]") == ("VFX/test_tree_sc010_sh010", None))
+    path, why = send_back.evaluate_bin("VFX/[getenv R2N_UNSET_VAR]")
+    check("bin: unset var -> VFX + reason", path == "VFX" and "R2N_UNSET_VAR" in why, (path, why))
+    check("bin: tidy slashes", send_back.evaluate_bin(" VFX//a/ ") == ("VFX/a", None))
+    check("bin: empty -> VFX", send_back.evaluate_bin("  ")[0] == "VFX")
+    check("bin: bad tcl -> VFX", send_back.evaluate_bin("VFX/[oops")[0] == "VFX")
+
+    # #================ SETTINGS
+    QtCore.QSettings(config.SETTINGS_ORG, config.SETTINGS_APP).clear()
+    check("settings: defaults when empty", settings.load_send_options() == send_back.SendOptions())
+    settings.save_send_options(send_back.SendOptions("playhead", "Comps/[getenv SHOT_NAME]"))
+    settings.save_shot_options(shot_build.ShotOptions(set_ocio=False, fps_source="clip", handles=8))
+    so, po = settings.load_send_options(), settings.load_shot_options()
+    check("settings: send remembered", (so.placement, so.bin) == ("playhead", "Comps/[getenv SHOT_NAME]"))
+    check("settings: fps/handles remembered, checkboxes not", (po.fps_source, po.handles, po.set_ocio) == ("clip", 8, True))
+    QtCore.QSettings(config.SETTINGS_ORG, config.SETTINGS_APP).setValue("send/placement", "nonsense")
+    check("settings: bad value -> default", settings.load_send_options().placement == "follow_clip")
+    config.REMEMBER_SETTINGS = False
+    check("settings: off -> defaults", settings.load_send_options() == send_back.SendOptions())
+    config.REMEMBER_SETTINGS = True
+    QtCore.QSettings(config.SETTINGS_ORG, config.SETTINGS_APP).clear()
+
+    # #================ MISC
+    from Resolve2Nuke import dialogs
+    check("dialogs: import headless", hasattr(dialogs, "open_pull_dialog") and hasattr(dialogs, "open_send_dialog"))
+
+    class FakeMPI:
+        def GetClipProperty(self, key=None):
+            p = {"Start": "0", "File Path": "/x/a.braw"}
+            return p.get(key) if key else p
+
+    class FakeItem:
+        def __init__(self, start, left): self.start, self.left = start, left
+        def GetUniqueId(self): return "id1"
+        def GetStart(self): return self.start
+        def GetLeftOffset(self): return self.left
+        def GetMediaPoolItem(self): return FakeMPI()
+        def GetTrackTypeAndIndex(self): return ["video", 1]
+
+    class FakeTimeline:
+        def __init__(self, item): self.item = item
+        def GetTrackCount(self, t): return 1
+        def GetItemListInTrack(self, t, i): return [self.item]
+
+    comp = resolve_bridge.CompPlacement("/x/c.%04d.exr", 107, 145, "p", "t", "id1", 1, 86400, 107)
+    check("follow maths: moved +100, trimmed 5", resolve_bridge._anchor(FakeTimeline(FakeItem(86600, 111)), comp, "follow_clip", [])[1] == 86595)
+    check("follow maths: head extended 10", resolve_bridge._anchor(FakeTimeline(FakeItem(86390, 96)), comp, "follow_clip", [])[1] == 86400)
+    check("seq path", resolve_bridge._nuke_path("/a/r.[0107-0145].exr") == ("/a/r.%04d.exr", True))
+
+    calls = []
+
+    class FakeMenu:
+        def addMenu(self, name, **kw): calls.append(("addMenu", name)); return self
+        def addCommand(self, name, cmd=None, **kw): calls.append(("addCommand", name, cmd))
+        def addSeparator(self): pass
+    nuke.menu = lambda name: FakeMenu()
+    exec(open("/home/harry/Code/Resolve2Nuke/menu.py").read(), {"__name__": "menu"})
+    names = [c[1] for c in calls if c[0] == "addCommand"]
+    check("menu: pull and send commands", "Pull shot from Resolve" in names and "Send comp to Resolve" in names, names)
+
+except Exception:
+    traceback.print_exc()
+    check("no exception", False)
+finally:
+    cleanup_resolve()
+    timeline.SetCurrentTimecode("01:00:00:00")
+    QtCore.QSettings(config.SETTINGS_ORG, config.SETTINGS_APP).clear()
+    print("V tracks after cleanup:", timeline.GetTrackCount("video"), "| bins:", snapshot()[2])
+    project.SetCurrentTimeline(user_timeline)
+    print("back on timeline:", project.GetCurrentTimeline().GetName())
+
+print(f"\n{sum(ok for _, ok in results)}/{len(results)} passed")
