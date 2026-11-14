@@ -79,8 +79,8 @@ CANON_TAGGED = dataclasses.replace(CANON, resolve_colorspace="Canon Cinema Gamut
 
 
 def grab(widget, name):
+    # # No adjustSize() here: the dialogs must size themselves, as they do in Nuke.
     widget.show()
-    widget.adjustSize()
     for _ in range(3):
         app.processEvents()
     path = os.path.join(OUT, f"{name}.png")
@@ -107,6 +107,14 @@ pull("pull_braw", BRAW)
 pull("pull_ramp_handles", RAMP, tweak=lambda d: d.handles.setValue(8))
 pull("pull_canon_untagged", CANON)
 pull("pull_canon_tagged", CANON_TAGGED, tweak=lambda d: (d.set_ocio.setChecked(False), d.create_write.setChecked(False)))
+def refresh_to(shot_):
+    def tweak(d):
+        with mock.patch.object(resolve_bridge, "get_shot", lambda resolve=None: shot_):
+            d.refresh()
+    return tweak
+
+
+pull("pull_refresh_braw_to_canon", BRAW, tweak=refresh_to(CANON))
 pull("pull_error", error="No clip selected, and no clip with source media under the playhead (01:00:05:00) on an enabled video track.")
 
 # #---- send dialog states

@@ -12,6 +12,8 @@ WA_DeleteOnClose so closing really deletes them (see _register).
 
 from __future__ import annotations
 
+import textwrap
+
 import nuke
 
 from Resolve2Nuke import actions
@@ -72,7 +74,14 @@ def _show(name: str, cls, *args) -> None:
         win.activateWindow()
 
 
-def _html(text: str, color: str | None = None, bold: bool = False) -> str:
+WRAP_CHARS = 70
+
+
+def _html(text: str, color: str | None = None, bold: bool = False, wrap: bool = False) -> str:
+    """Escape for a rich-text label. wrap=True breaks long text into lines here,
+    because QLabel's own word wrap mis-sizes in form layouts (it clipped in Nuke)."""
+    if wrap:
+        text = "\n".join(textwrap.fill(line, WRAP_CHARS) for line in text.split("\n"))
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
     if bold:
         text = f"<b>{text}</b>"
@@ -83,9 +92,7 @@ def _label() -> QtWidgets.QLabel:
     label = QtWidgets.QLabel()
     label.setTextFormat(QtCore.Qt.RichText)
     label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-    # # Wrap, so long warnings don't clip or squeeze the form's label column.
-    label.setWordWrap(True)
-    label.setMinimumWidth(380)
+    # # No word wrap: it mis-sizes in form layouts. Long text is broken by _html(wrap=True).
     return label
 
 
@@ -128,6 +135,15 @@ class _Dialog(QtWidgets.QDialog):
 
     def refresh(self) -> None:
         raise NotImplementedError
+
+    def fit_height(self) -> None:
+        """Fit the text after it changes: grow wider if needed (never narrower,
+        so the window doesn't jump about), and take exactly the height it needs."""
+        self.layout_.invalidate()
+        self.layout_.activate()
+        hint = self.sizeHint()
+        width = max(self.width() if self.isVisible() else 0, hint.width(), self.minimumWidth())
+        self.resize(width, hint.height())
 
 
 # #----------------------------------------------------------------------------
@@ -203,7 +219,7 @@ class PullDialog(_Dialog):
             self._shot = resolve_bridge.get_shot()
         except resolve_bridge.ResolveError as e:
             self._shot = None
-            self.clip_label.setText(_html(str(e), RED))
+            self.clip_label.setText(_html(str(e), RED, wrap=True))
             for label in (self.position_label, self.source_label, self.retime_label, self.colour_label, self.fps_label):
                 label.setText("")
         self._update_labels()
@@ -240,7 +256,7 @@ class PullDialog(_Dialog):
             text = _html(f"{shot.resolve_colorspace}  →  unknown, the Read will need setting by hand", RED)
         tag_warning = shot.colour_tag_warning()
         if tag_warning:
-            text += "<br>" + _html(tag_warning, ORANGE)
+            text += "<br>" + _html(tag_warning, ORANGE, wrap=True)
         self.colour_label.setText(text)
 
         if abs(shot.clip_fps - shot.timeline_fps) < 0.001:
@@ -252,7 +268,9 @@ class PullDialog(_Dialog):
                 f"   clip {shot.clip_fps:g}, played frame-for-frame (1:1)", GREY))
         else:
             self.fps_label.setText(_html(f"clip {shot.clip_fps:g}, timeline {shot.timeline_fps:g}: Resolve isn't "
-                                         f"playing it frame-for-frame, so frames won't map 1:1", ORANGE))
+                                         f"playing it frame-for-frame, so frames won't map 1:1", ORANGE, wrap=True))
+        # # Re-fit: wrapped labels change height with their text.
+        self.fit_height()
 
     def _update_enabled(self) -> None:
         shot = self._shot
@@ -339,7 +357,7 @@ class SendDialog(_Dialog):
         rng = f"{info.first}-{info.last} ({info.frame_count} frames)"
         if info.missing:
             self.frames_label.setText(_html(rng) + "<br>" + _html(
-                f"missing {len(info.missing)}: {send_back.format_frames(info.missing)}", RED))
+                f"missing {len(info.missing)}: {send_back.format_frames(info.missing)}", RED, wrap=True))
         else:
             self.frames_label.setText(_html(rng) + "  " + _html("all rendered", GREEN))
         s = info.stamp
@@ -354,7 +372,7 @@ class SendDialog(_Dialog):
             self._plan = send_back.preview(self._info, options)
         except (resolve_bridge.ResolveError, ValueError) as e:
             self._plan = None
-            self.preview_label.setText(_html(str(e), RED))
+            self.preview_label.setText(_html(str(e), RED, wrap=True))
         else:
             p = self._plan
             text = _html(f"→ V{p.track} at {p.record_in_tc}, {p.duration} frames", bold=True)
@@ -364,10 +382,10 @@ class SendDialog(_Dialog):
                 text += _html("  ·  reusing the clip in the bin", GREY)
             # # The bin fallback is already shown under the bin field.
             for w in [w for w in p.warnings if not w.startswith("Bin ")]:
-                text += "<br>" + _html(w, ORANGE)
+                text += "<br>" + _html(w, ORANGE, wrap=True)
             self.preview_label.setText(text)
         self.action_button.setEnabled(self._plan is not None and not self._info.missing)
-        self.adjustSize()
+        self.fit_height()
 
     def _send(self) -> None:
         options = self.options()

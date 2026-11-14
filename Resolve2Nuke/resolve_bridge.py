@@ -89,8 +89,8 @@ class ShotInfo:
         is_braw = "blackmagic raw" in self.codec.lower() or self.file_path.lower().endswith(".braw")
         bmd_space = self.resolve_colorspace.startswith("Blackmagic Design")
         if self.colorspace_from_project and not is_braw:
-            return (f"Not tagged in Resolve, so it uses the project's '{self.resolve_colorspace}'. "
-                    f"Check its Input Color Space (Color page, right-click the thumbnail).")
+            return ("Not tagged in Resolve, so it uses the project's input colour space. "
+                    "Tag it in the Color page if that's wrong.")
         if is_braw and not bmd_space:
             return f"A BRAW tagged '{self.resolve_colorspace}'. Check its Input Color Space."
         return None
