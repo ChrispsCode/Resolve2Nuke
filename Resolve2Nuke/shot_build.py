@@ -96,6 +96,8 @@ def _create_read(shot: ShotInfo) -> tuple[nuke.Node, bool]:
     for n in nuke.selectedNodes():
         n.setSelected(False)
     read = nuke.createNode("Read", inpanel=False)
+    read.setName(config.HERO_READ_NAME)
+    read["tile_color"].setValue(config.HERO_READ_COLOR)
 
     # # fromUserText scans the file's frame range. nuke.nodes.Read(file=...) leaves it at 1-1.
     if shot.is_sequence:

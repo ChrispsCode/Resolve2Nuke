@@ -156,6 +156,48 @@ A **Template plate** option in the pull dialog (off by default, only when hozed)
 - Unique IDs survive a Resolve restart.
 - The MCP `run_script` has a 10 s limit. Start renders in one call and poll in another, and restore settings in the polling call.
 
+## Cameras and project colour assumptions
+
+**What the tool assumes about the Resolve project** (read before using it on a differently set-up project):
+
+- **Colour science is DaVinci YRGB Color Managed, with the timeline in DaVinci WG/Intermediate.** Three things depend on it:
+  - **The grade LUT** is applied in `config.GRADE_LUT_SPACE` = DaVinci Intermediate WideGamut, because Resolve grades in the timeline's working space. **On a project with another timeline colour space (e.g. the Rec.709 "per clip" or "basic" setups in Harry's colour doc), the LUT would quietly be applied in the wrong space.** The fix, not built yet: read `project.GetSetting("colorSpaceTimeline")`, map it to an OCIO name (a table like `RESOLVE_TO_OCIO`), use that for the ResolveGrade group, and show an orange warning in the pull dialog for anything unmapped.
+  - **Template plates** need a colour-managed timeline. On anything else they refuse with a clear error rather than writing a wrong plate.
+  - **Sent comps** are tagged `config.WRITE_RESOLVE_COLORSPACE` (Blackmagic Design Film Gen 5). That only works under colour management.
+- **The project's input colour space doesn't matter**, since sent comps are tagged explicitly. A Canon-primary project works the same way.
+
+**Harry's cameras (2026-11-14):**
+
+| Camera | File | Nuke reads it? | Hero Read colour | Status |
+|---|---|---|---|---|
+| Blackmagic Pocket 4K | BRAW | Yes (Nuke 17.1, SDK 5.1) | `BMDFilm WideGamut Gen5`, from `RESOLVE_TO_OCIO` | Pixel-tested end to end |
+| Canon R6 | HEVC 4:2:2 10-bit MP4, C-Log3 | **No** (unsupported codec on Linux) | (errors) | Use a **template plate**: Resolve decodes it, Nuke reads BMD Film. Pixel-tested |
+| iPhone | HEVC/H.264, or ProRes (Apple Log if shot in Log) | **Untested** | none yet (unknown colour space dialog) | See below |
+
+**Adding a camera (or the iPhone):**
+
+1. **Tag the clip in Resolve** (Color page, right-click the thumbnail > Input Color Space). The pull dialog shows the tag, and the orange tag check catches an untagged clip.
+2. **Can Nuke read the file?** Pull it and see whether the hero Read errors. If it doesn't:
+   - Either: use a template plate (always works, and gets Resolve's decode).
+   - Or: convert it with the separate conversion tool (another repo) for a full-range hero plate.
+3. **If Nuke reads it, map its colour space.** Add Resolve's input colour space name → the OCIO name to `config.RESOLVE_TO_OCIO`. The studio config has Canon (`CanonLog3 CinemaGamut D55`, `CanonLog2 CinemaGamut D55`) and Apple (`Apple Log`), among others: `grep "name:" fn-nuke_studio-config-v2.2.0_aces-v1.3_ocio-v2.4.ocio`. **Only add a mapping once it's pixel-tested.**
+4. **Pixel-test the mapping** the same way BRAW was tested:
+   1. Read the camera file in Nuke with the new mapping, and write it straight out (no comp).
+   2. Send it back.
+   3. Set Difference mode over the original in Resolve. It should be black.
+   
+   The headless version: render a template plate of the same clip, and compare it with the Nuke read in BMD Film code values. The tests in `tests/test_r2n.py` show how.
+5. **Video-range files** (most HEVC/H.264): check that Nuke's mov reader and Resolve agree on data levels (`mov64_decode_video_levels` on the Read, "Data Level" on the Resolve clip). This is the likely source of a slight lift or crush if a new camera doesn't match.
+
+## Moving to another computer
+
+Everything machine-specific is in `config.py`:
+
+- **`TEMPLATE_STAGING_DIR`** (`~/DaVinci Resolve Media/Resolve2Nuke`). Resolve only renders into its **Media Storage** locations (Preferences > System > Media Storage), so this folder, or one above it, has to be mapped there on the new machine. If it isn't, template renders stop with a message saying so. On 2026-11-14 the mapped locations were `~/Videos`, `~/DaVinci Resolve Media` and `~/Documents/DevTest`.
+- **`RESOLVE_SCRIPT_API` / `RESOLVE_SCRIPT_LIB`:** Resolve's scripting paths, with per-platform defaults. Resolve's Preferences > System > General > "External scripting using" must be **Local**.
+- **Nuke 17.1+** (`menu.py` gates it), and the plugin path line in `~/.nuke/init.py`.
+- **hoz** sets `SHOT_ROOT` / `SHOT_NAME`. The Write path, template plates, grade LUTs and the default bin all use them.
+
 ## Roadmap
 
 - [ ] GUI for pull (`ShotOptions` as checkboxes, with fps source greyed out when the clip and timeline match, plus a confirmation) and for send (placement mode, plus a bin line edit defaulting to `VFX/[SHOT_NAME]` so many shots and versions stay tidy; nested bins need creating level by level).
@@ -164,7 +206,8 @@ A **Template plate** option in the pull dialog (off by default, only when hozed)
 - [x] Grade LUT reference branch (v0.6.0).
 - [ ] A separate tool (another repo) to convert camera files Nuke can't read, for full-range hero plates.
 - [ ] Versioned Write paths (the `v01` is hard-coded). Harry plans a better path setter.
-- [ ] More pixel-tested colour mappings. Canon may not need one: template plates come out as BMD Film.
+- [ ] More pixel-tested colour mappings, when a camera Nuke can read needs one (see "Adding a camera").
+- [ ] Grade LUT space from the project's timeline colour space, with a warning for unmapped spaces (see "Cameras and project colour assumptions").
 - [ ] Drop-frame timelines for playhead pick and placement.
 - [ ] Optional system-Python fallback for the Resolve connection.
 

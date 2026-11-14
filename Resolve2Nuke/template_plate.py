@@ -97,6 +97,8 @@ def create_read(plate: PlateTarget, shot: ShotInfo, beside: nuke.Node | None = N
     for n in nuke.selectedNodes():
         n.setSelected(False)
     read = nuke.createNode("Read", inpanel=False)
+    read.setName(config.TEMPLATE_READ_NAME)
+    read["tile_color"].setValue(config.TEMPLATE_READ_COLOR)
     if plate.is_movie:
         read["file"].fromUserText(plate.path)
         # # A movie reads as frames 1-N; start it at the comp's first frame.

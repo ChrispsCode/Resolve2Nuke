@@ -133,6 +133,8 @@ try:
     check("pull: read timecode at 107", r.metadata("input/timecode", 107) == "12:00:07:12")
     check("pull: write knobs", (w.input(0) is r, w["colorspace"].value(), w["datatype"].value(), w["create_directories"].value())
           == (True, "BMDFilm WideGamut Gen5", "16 bit half", True))
+    check("pull: hero Read name/colour", r.name().startswith("Read_HeroPlate") and int(r["tile_color"].value()) == config.HERO_READ_COLOR,
+          (r.name(), r["tile_color"].value()))
     check("pull: read and write stamped alike", stamp.read_stamp(w) == stamp.read_stamp(r) and stamp.read_stamp(r).item_id == shot.item_id)
     nuke.undo()
     check("pull: one undo step", not nuke.allNodes())
@@ -335,6 +337,8 @@ try:
         for f in (107, 145):
             d = sorted(abs(hero.sample(c, x, y, frame=f) - tr.sample(c, x, y, frame=f)) for x, y in pts for c in ("rgba.red", "rgba.green"))
             check(f"template exr: matches hero BRAW at {f}", d[len(d) // 2] < 0.002 and d[-1] < 0.01, (round(d[len(d) // 2], 5), round(d[-1], 5)))
+        check("template exr: Read name/colour", tr.name().startswith("Read_Template") and int(tr["tile_color"].value()) == config.TEMPLATE_READ_COLOR,
+              (tr.name(), tr["tile_color"].value()))
         check("template exr: stamped, BMD Film", stamp.read_stamp(tr).item_id == shot.item_id and tr["colorspace"].value() == config.TEMPLATE_COLORSPACE)
     check("template: next is v02", template_plate.target("prores").version == 2)
 
@@ -418,6 +422,8 @@ try:
             check("grade: group made, no error", grp is not None and not messages, messages)
             check("grade: LUT v01 written, not an identity", os.path.isfile(g1) and not resolve_bridge.cube_is_identity(g1))
             check("grade: branch off the Read, Write still on the Read", grp.input(0) is res.read and res.write.input(0) is res.read)
+            check("grade: group name/colour", grp.name().startswith("ResolveGrade") and int(grp["tile_color"].value()) == config.GRADE_GROUP_COLOR,
+                  (grp.name(), grp["tile_color"].value()))
             check("grade: group shows the LUT file", grp["vfield_file"].value() == g1, grp["vfield_file"].value())
             check("grade: next LUT is v02", grade_lut.lut_path().endswith("_grade_v02.cube"))
             check("grade: Resolve back on its page", resolve.GetCurrentPage() == page_before)

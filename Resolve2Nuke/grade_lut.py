@@ -47,7 +47,8 @@ def create_group(source: nuke.Node, path: str) -> nuke.Node:
     """The ResolveGrade group, fed from source, beside the main pipe."""
     for n in nuke.selectedNodes():
         n.setSelected(False)
-    group = nuke.nodes.Group(name="ResolveGrade")
+    group = nuke.nodes.Group()
+    group.setName(config.GRADE_GROUP_NAME)
     group.begin()
     try:
         inp = nuke.nodes.Input(name="Input")
@@ -66,7 +67,7 @@ def create_group(source: nuke.Node, path: str) -> nuke.Node:
     group.addKnob(note)
     group.setInput(0, source)
     group["label"].setValue(f"Resolve grade (reference)\n{os.path.basename(path)}")
-    group["tile_color"].setValue(0x7f6a3aff)
+    group["tile_color"].setValue(config.GRADE_GROUP_COLOR)
     group.setXYpos(source.xpos() - 150, source.ypos() + 60)
     logger.info(f"Grade LUT {path} -> {group.name()}")
     return group

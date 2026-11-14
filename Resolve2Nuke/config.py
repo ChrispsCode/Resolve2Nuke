@@ -139,6 +139,16 @@ SETTINGS_ORG = "Resolve2Nuke"
 SETTINGS_APP = "Resolve2Nuke"
 
 # #----------------------------------------------------------------------------
+# # Node names and colours (setName adds a number when the name is taken)
+
+HERO_READ_NAME = "Read_HeroPlate"
+HERO_READ_COLOR = 536805631
+TEMPLATE_READ_NAME = "Read_Template"
+TEMPLATE_READ_COLOR = 4292546815
+GRADE_GROUP_NAME = "ResolveGrade"
+GRADE_GROUP_COLOR = 2057961216
+
+# #----------------------------------------------------------------------------
 # # Knobs added to the Read to remember where it came from in Resolve.
 # # These names are a public API: the send-back step reads them from saved scripts.
 
